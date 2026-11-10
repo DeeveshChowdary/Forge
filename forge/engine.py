@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import gitops, prompts, schemas
+from . import gitops, integrations, prompts, schemas
 from . import workflows as wfmod
 from .db import dumps, loads, new_id, now
 from .domain import ACTIVE, TERMINAL, ProjectConfig, TaskState
@@ -565,6 +565,7 @@ class Engine:
             shell_allowlist=self._shell_allowlist(cfg), allow_network=cfg.permissions.allow_network_tools,
             output_schema=schema, system_append=prompts.system_prompt(phase, bool(schema)), timeout_s=timeout,
             max_turns=int(limits.get("max_turns", 40)), log_path=log_dir / f"{run_id}.log",
+            mcp_config_path=integrations.mcp_config_for(self.forge, task["project_id"]),
             metadata={"mock": task["metadata"].get("mock"), "attempt": attempt, "review_cycle": task["review_cycle"],
                       "objective": task["objective"], "acceptance_criteria": task["acceptance_criteria"]},
         )
