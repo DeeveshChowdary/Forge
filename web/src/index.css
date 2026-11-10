@@ -1,0 +1,27 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html, body, #root { height: 100%; }
+body { @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100; }
+
+@layer components {
+  .card { @apply rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900; }
+  .card-h { @apply flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-3 text-sm font-semibold dark:border-zinc-800; }
+  .btn { @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-800 hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700; }
+  .btn-primary { @apply border-orange-600 bg-orange-600 text-white hover:bg-orange-700 dark:border-orange-600 dark:bg-orange-600 dark:hover:bg-orange-500; }
+  .btn-danger { @apply border-red-300 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950; }
+  .btn-sm { @apply px-2 py-1 text-xs; }
+  .input { @apply w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm placeholder:text-zinc-400 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/30 dark:border-zinc-700 dark:bg-zinc-900; }
+  .label { @apply mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400; }
+  .muted { @apply text-zinc-500 dark:text-zinc-400; }
+  .pill { @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap; }
+  .tbl { @apply w-full text-left text-sm; }
+  .tbl th { @apply border-b border-zinc-200 px-3 py-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800; }
+  .tbl td { @apply border-b border-zinc-100 px-3 py-2 align-top dark:border-zinc-800/60; }
+  .code { @apply overflow-auto rounded-lg bg-zinc-100 p-3 font-mono text-xs leading-relaxed dark:bg-zinc-950; }
+}

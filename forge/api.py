@@ -316,6 +316,27 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
         p = forge.projects.get(pid)
         return gitops.log(p["root_path"], n) if gitops.is_repo(p["root_path"]) else []
 
+    @app.get("/api/projects/{pid}/runs")
+    def project_runs(pid: str, limit: int = 100):
+        p = forge.projects.get(pid)
+        rows = forge.db.query(
+            "SELECT r.id, r.task_id, r.phase, r.role, r.kind, r.provider, r.model, r.resolved_model, r.effort, r.state, "
+            "r.attempt, r.review_cycle, r.session_id, r.usage, r.error, r.started_at, r.ended_at, t.title "
+            "FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.project_id=? ORDER BY r.started_at DESC LIMIT ?",
+            (p["id"], limit))
+        for r in rows:
+            r["usage"] = loads(r["usage"], {})
+            r["is_mock"] = r["provider"] == "mock"
+        return rows
+
+    @app.get("/api/projects/{pid}/artifacts")
+    def project_artifacts(pid: str, kind: str | None = None, limit: int = 100):
+        p = forge.projects.get(pid)
+        rows = forge.artifacts.list(project_id=p["id"], kind=kind, limit=1000)[-limit:]
+        for r in rows:
+            r["content"] = r["content"][:4000]
+        return list(reversed(rows))
+
     @app.post("/api/projects/{pid}/instructions/scan")
     def scan_instr(pid: str):
         return forge.projects.scan_instruction_files(pid)

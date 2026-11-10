@@ -10,7 +10,7 @@ import hashlib
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import gitops
 from .db import Database, dumps, loads, new_id, now
@@ -58,6 +58,7 @@ class ProjectService:
         self.db = db
         self.bus = bus
         self.projects_root = projects_root
+        self.default_limits: Callable[[], dict] = lambda: {}
 
     # --- reads -------------------------------------------------------------
     def _hydrate(self, r: dict) -> dict:
@@ -101,6 +102,11 @@ class ProjectService:
             if root.is_relative_to(op) or op.is_relative_to(root):
                 raise Conflict(f"{root} overlaps with project {other['name']!r} at {op}")
 
+    def _cfg(self, config: dict | None) -> ProjectConfig:
+        raw = dict(config or {})
+        raw["limits"] = {**self.default_limits(), **(raw.get("limits") or {})}
+        return ProjectConfig.from_raw(raw)
+
     def _insert(self, name: str, root: Path, origin: str, description: str, cfg: ProjectConfig,
                 instructions: str = "") -> dict:
         pid = new_id("p")
@@ -130,7 +136,7 @@ class ProjectService:
         gitops.init_repo(root)
         (root / "README.md").write_text(f"# {name}\n\n{description}\n")
         gitops.commit_all(root, "Initial commit (created by Forge)")
-        cfg = ProjectConfig.from_raw(config)
+        cfg = self._cfg(config)
         return self._insert(name, root, "created", description, cfg, instructions)
 
     def import_folder(self, path: str, name: str | None = None, description: str = "",
@@ -142,7 +148,7 @@ class ProjectService:
             root = gitops.repo_root(root)
         name = name or root.name
         self._check_unique(name, root)
-        cfg = ProjectConfig.from_raw(config)
+        cfg = self._cfg(config)
         is_git = gitops.is_repo(root)
         if not is_git or not gitops.has_commits(root):
             # Without commits there is nothing to branch from, so agent writes cannot be
@@ -164,7 +170,7 @@ class ProjectService:
                            env={"GIT_TERMINAL_PROMPT": "0", "PATH": "/usr/bin:/bin:/opt/homebrew/bin"})
         if p.returncode != 0:
             raise ValueError(f"git clone failed: {p.stderr.strip()[:500]}")
-        return self._insert(name, dest, "imported_git", description, ProjectConfig.from_raw(config))
+        return self._insert(name, dest, "imported_git", description, self._cfg(config))
 
     # --- updates -------------------------------------------------------------
     def update(self, pid: str, *, description: str | None = None, instructions: str | None = None,

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "forge-demo",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": ["FORGE_HOME=/Users/deeveshchowdary/Desktop/github_projects/Forge/.forge-local/demo", ".venv/bin/forge", "serve", "--port", "8766"],
+      "port": 8766
+    }
+  ]
+}

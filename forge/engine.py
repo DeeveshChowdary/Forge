@@ -924,7 +924,8 @@ class Engine:
             self._to(parent, S.FAILED, f"subtasks not completed: {', '.join(bad)}", disposition="subtasks failed")
 
 
-_PYTEST = re.compile(r"=+ (.*?(?:passed|failed|error|errors|skipped|no tests ran).*?) in [\d.]+s", re.I)
+_PYTEST = re.compile(r"^(?:=+ )?(\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b.*?|no tests ran) in [\d.]+s",
+                     re.I | re.M)
 
 
 def _test_summary(output: str) -> str:

@@ -20,6 +20,7 @@ class Forge:
         self.db = Database(paths.db)
         self.bus = EventBus(self.db)
         self.projects = ProjectService(self.db, self.bus, paths.projects)
+        self.projects.default_limits = lambda: self.settings().default_limits.model_dump()
         self.tasks = TaskService(self.db, self.bus, self.projects)
         self.artifacts = ArtifactService(self.db, self.bus)
         self.approvals = ApprovalService(self.db, self.bus)
