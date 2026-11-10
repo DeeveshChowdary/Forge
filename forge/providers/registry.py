@@ -116,7 +116,8 @@ class ProviderRegistry:
     async def probe(self, provider: str, model_id: str) -> dict:
         a = self.get(provider)
         res = await a.probe(model_id)
-        status = "verified" if res.ok else "failed"
+        # An auth failure says nothing about the model itself: keep it unverified and flag the provider.
+        status = "verified" if res.ok else ("unverified" if res.error_kind == "auth" else "failed")
         self.db.execute(
             "UPDATE models SET status=?, resolved_id=COALESCE(?, resolved_id), detail=?, verified_at=?, updated_at=? "
             "WHERE provider=? AND model_id=?",
@@ -152,7 +153,9 @@ class ProviderRegistry:
                 "detail=CASE WHEN status='verified' THEN detail ELSE 'verified by a successful run' END "
                 "WHERE provider=? AND model_id=?", (resolved, now(), provider, model_id))
             self._note_probe(provider, True, None, "")
-        elif error_kind in ("auth", "model_unavailable"):
+        elif error_kind == "auth":
+            self._note_probe(provider, False, error_kind, detail)
+        elif error_kind == "model_unavailable":
             self.db.execute("UPDATE models SET status='failed', detail=? WHERE provider=? AND model_id=?",
                             (detail[:500], provider, model_id))
             self._note_probe(provider, False, error_kind, detail)

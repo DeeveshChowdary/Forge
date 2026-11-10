@@ -489,7 +489,7 @@ class Engine:
     def _shell_allowlist(self, cfg: ProjectConfig) -> list[str]:
         allow = ["python -m pytest", "python3 -m pytest", "pytest", "git status", "git diff", "git log", "ls"]
         if cfg.test_command:
-            parts = shlex.split(cfg.test_command.replace("{python}", "python"))
+            parts = shlex.split(cfg.test_command.replace("{python}", sys.executable))
             if parts:
                 allow.insert(0, " ".join(parts[:3]))
         return allow
@@ -530,7 +530,8 @@ class Engine:
                      "tests in the latest test report.")
         prompt = prompts.build(phase, task, instructions=self.forge.projects.trusted_instructions(task["project_id"]),
                                memory=memory, handoffs=self._handoffs(task, phase), read_only=read_only,
-                               test_command=cfg.test_command, schema=schema, extra=extra)
+                               test_command=cfg.test_command.replace("{python}", sys.executable),
+                               schema=schema, extra=extra)
         remaining = int(limits.get("max_task_runtime_s", 7200)) - int(now() - (task["started_at"] or now()))
         timeout = max(1, min(int(limits.get("max_runtime_s", 1800)), remaining))
         attempt = int(task["attempts"]) + 1
