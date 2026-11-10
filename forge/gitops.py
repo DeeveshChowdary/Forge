@@ -75,9 +75,19 @@ def init_repo(path: Path) -> None:
     git(path, "init", "-b", "main")
 
 
+JUNK = re.compile(r"(^|/)(__pycache__/|\.pytest_cache/|\.mypy_cache/|\.DS_Store$)|\.py[co]$")
+
+
 def commit_all(path: Path | str, message: str) -> str | None:
-    """Stage and commit everything in a *worktree*. Returns the new sha or None if no changes."""
+    """Stage and commit everything in a *worktree*. Returns the new sha or None if no changes.
+
+    Newly added build/cache artefacts (bytecode, pytest caches) are never committed;
+    deletions of previously committed ones still are."""
     git(path, "add", "-A")
+    added = git(path, "diff", "--cached", "--name-only", "--diff-filter=A").splitlines()
+    junk = [f for f in added if JUNK.search(f)]
+    if junk:
+        git(path, "rm", "-q", "--cached", "--", *junk)
     if not git(path, "status", "--porcelain").strip():
         return None
     git(path, "commit", "-q", "-m", message, "--no-verify", identity=True)

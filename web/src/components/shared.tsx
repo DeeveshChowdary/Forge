@@ -58,6 +58,14 @@ export function ApprovalCard({ a, onDone }: { a: Approval; onDone?: () => void }
             onChange={(e) => setNote(e.target.value)} aria-label="Decision note" />
           <button className="btn btn-primary" disabled={busy} onClick={() => decide(true)}>Approve</button>
           <button className="btn btn-danger" disabled={busy} onClick={() => decide(false)}>Reject</button>
+          {a.task_id && ["merge", "review_unresolved"].includes(a.kind) && (
+            <button className="btn" disabled={busy} title="Send the latest review (all severities) and your note back to the implementer"
+              onClick={async () => {
+                setBusy(true); setErr(null);
+                try { await api.post(`/api/tasks/${a.task_id}/revise`, { note }); onDone?.(); }
+                catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+              }}>Request revision</button>
+          )}
         </div>
       ) : (
         <div className="text-xs muted">{a.status} {a.decided_at ? ago(a.decided_at) : ""} {a.decision_note ? `— ${a.decision_note}` : ""}</div>

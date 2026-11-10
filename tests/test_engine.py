@@ -340,3 +340,32 @@ async def test_single_engine_lock(mock_app):
     a.release_lock()
     assert b.acquire_lock() is True
     b.release_lock()
+
+
+async def test_user_requested_revision_runs_fix_loop(mock_app, py_repo):
+    app = mock_app
+    p = project(app, py_repo)
+    t = submit_task(app, p["id"], title="mul", objective="Add mul",
+                    metadata={"mock": {"files": MUL_IMPL, "fix_files": {"README.md": "# fixed\n"}}})
+    await drive(app, [t["id"]])
+    first = app.approvals.list(task_id=t["id"], status="pending")[0]
+    app.engine.request_revision(t["id"], "remove stray files")
+    assert app.approvals.get(first["id"])["status"] == "rejected"
+    assert app.tasks.get(t["id"])["phase"] == "fix"
+    await drive(app, [t["id"]])
+    t = app.tasks.get(t["id"])
+    assert [r["phase"] for r in runs(app, t["id"])][-3:] == ["fix", "test", "review"]
+    assert t["state"] == "AWAITING_APPROVAL" and t["metadata"]["user_revisions"] == 1
+    assert not t["metadata"]["fix_all_issues"]
+    assert app.artifacts.list(task_id=t["id"], kind="revision_request")
+
+
+def test_commit_all_skips_new_bytecode(tmp_path):
+    from forge import gitops
+    repo = make_repo(tmp_path / "bc")
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "m.cpython-314.pyc").write_bytes(b"\0")
+    (repo / "m.py").write_text("x = 1\n")
+    gitops.commit_all(repo, "c")
+    files = gitops.git(repo, "ls-files").split()
+    assert "m.py" in files and not any(f.endswith(".pyc") for f in files)

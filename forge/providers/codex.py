@@ -61,7 +61,12 @@ class CodexAdapter(ProviderAdapter):
 
     def env(self) -> dict[str, str]:
         b = self.binary()
-        prepend = [str(Path(b).parent)] if b else []
+        prepend = []
+        if b:
+            prepend.append(str(Path(b).parent))
+            bundled = Path(b).parent / "codex-path"  # editor bundles ship rg here
+            if bundled.is_dir():
+                prepend.append(str(bundled))
         return clean_env(path_prepend=prepend)  # no OPENAI_API_KEY: uses the stored ChatGPT login
 
     def _common(self) -> list[str]:

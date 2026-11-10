@@ -38,7 +38,7 @@ def classify_error(text: str) -> str:
     if any(k in s for k in ("rate limit", "rate_limit", "429", "usage limit", "quota", "too many requests")):
         return "rate_limit"
     if any(k in s for k in ("model not found", "unknown model", "invalid model", "model_not_found",
-                            "does not exist", "not supported", "unsupported model")):
+                            "does not exist", "not supported", "unsupported model", "does not support this model")):
         return "model_unavailable"
     return "other"
 

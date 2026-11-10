@@ -30,6 +30,7 @@ def clean_env(extra: dict[str, str] | None = None, *, path_prepend: list[str] | 
     env["PATH"] = ":".join(parts)
     env.setdefault("LANG", "en_US.UTF-8")
     env["NO_COLOR"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.update(extra or {})
     return env
 

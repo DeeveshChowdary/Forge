@@ -153,7 +153,12 @@ def _overrides(specs: list[str] | None) -> dict:
         parts = rest.split(":")
         if len(parts) < 2:
             raise SystemExit(f"bad --route {s!r}; expected phase=provider:model[:effort]")
-        out[phase] = {"provider": parts[0], "model": parts[1], **({"effort": parts[2]} if len(parts) > 2 else {})}
+        route = {"provider": parts[0], "model": parts[1], **({"effort": parts[2]} if len(parts) > 2 else {})}
+        if phase in out:  # repeated phase = several agents (fan-out phases such as 'propose')
+            prev = out[phase]
+            out[phase] = [*(prev if isinstance(prev, list) else [prev]), route]
+        else:
+            out[phase] = route
     return out
 
 
@@ -170,9 +175,10 @@ def cmd_plan(a) -> int:
             print(f"  {ph.key:12} {ph.state.value:10} {ph.kind:7} {what}")
             continue
         try:
+            o = ov.get(ph.key)
             d = f.router.route(RouteContext(project_id=p["id"], task_id="plan-preview", phase=ph.key, role=ph.role,
-                                            complexity=a.complexity, mode=a.mode, override=ov.get(ph.key)),
-                               persist=False)
+                                            complexity=a.complexity, mode=a.mode,
+                                            override=o[0] if isinstance(o, list) else o), persist=False)
             print(f"  {ph.key:12} {ph.state.value:10} {ph.role:12} → {d.provider}/{d.model} effort={d.effort}")
             for r in d.reasons:
                 print(f"      {C['d']}{r}{C['x']}")
@@ -286,6 +292,34 @@ def cmd_control(a) -> int:
     return 0
 
 
+def cmd_worker(a) -> int:
+    """Run the execution engine in the foreground (no web server)."""
+    f = Forge.create(discover=True)
+    lock = f.engine.lock_info()
+    if lock and lock["alive"]:
+        print(f"another engine (pid {lock['pid']}) is already running; it will execute queued tasks")
+        return 1
+    if a.task:
+        return _follow(f, a.task, drive=True)
+    print("engine running; Ctrl-C to stop (running tasks are requeued and resume next time)")
+    try:
+        if a.until_idle:
+            asyncio.run(f.engine.run_until_idle(None, timeout=24 * 3600))
+            f.engine.release_lock()
+        else:
+            asyncio.run(f.engine.run_forever())
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_revise(a) -> int:
+    f = _forge()
+    t = f.engine.request_revision(a.task, a.note or "")
+    print(f"{t['id']}: {t['state']} (phase {t['phase']}, cycle {t['review_cycle']}) — the engine will run the fix phase")
+    return 0
+
+
 def cmd_logs(a) -> int:
     f = _forge()
     t = f.tasks.get(a.task)
@@ -371,6 +405,16 @@ def main(argv: list[str] | None = None) -> int:
         c = sub.add_parser(name, help=f"{name} a task")
         c.add_argument("task")
         c.set_defaults(fn=cmd_control)
+
+    wk = sub.add_parser("worker", help="run the execution engine in the foreground without the web server")
+    wk.add_argument("task", nargs="?", help="follow this task and stop when it is done or needs you")
+    wk.add_argument("--until-idle", action="store_true")
+    wk.set_defaults(fn=cmd_worker)
+
+    rv = sub.add_parser("revise", help="send the latest review + a note back to the implementer (from AWAITING_APPROVAL)")
+    rv.add_argument("task")
+    rv.add_argument("--note")
+    rv.set_defaults(fn=cmd_revise)
 
     lg = sub.add_parser("logs", help="show a task's event log")
     lg.add_argument("task")

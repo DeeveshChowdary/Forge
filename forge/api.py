@@ -459,6 +459,10 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
     def cancel(tid: str):
         return forge.tasks.request_cancel(tid)
 
+    @app.post("/api/tasks/{tid}/revise")
+    def revise(tid: str, body: dict[str, str]):
+        return forge.engine.request_revision(tid, body.get("note", ""))
+
     @app.post("/api/tasks/{tid}/retry")
     def retry(tid: str):
         return forge.tasks.retry(tid)

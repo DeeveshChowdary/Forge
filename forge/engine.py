@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from . import gitops, integrations, prompts, schemas
 from . import workflows as wfmod
 from .db import dumps, loads, new_id, now
-from .domain import ACTIVE, TERMINAL, ProjectConfig, TaskState
+from .domain import ACTIVE, TERMINAL, InvalidTransition, ProjectConfig, TaskState
 from .providers.base import ExecRequest, ExecResult
 from .providers.proc import clean_env, kill_pid_group, pid_alive, run_streaming
 from .router import RouteContext, RoutingError
@@ -41,6 +41,7 @@ LOCK_STALE_S = 20
 FINISH = "__finish__"
 AWAIT_CHILDREN = "__await_children__"
 BLOCKING_SEVERITIES = {"blocker", "major"}
+MAX_USER_REVISIONS = 3
 SCHEMA_ARTIFACT_KIND = {"plan": "plan", "handoff": "handoff", "review": "review", "report": "report",
                         "proposal": "proposal"}
 
@@ -470,7 +471,7 @@ class Engine:
         if phase.role in ("implementer", "builder", "experimenter"):
             want = ["plan", "report"]
         elif phase.role == "fixer":
-            want = ["plan", "review", "test_report", "handoff"]
+            want = ["plan", "review", "test_report", "handoff", "revision_request"]
         elif phase.role == "reviewer":
             want = ["plan", "handoff", "test_report"]
         elif phase.role in ("analyst", "researcher"):
@@ -525,7 +526,10 @@ class Engine:
             task["project_id"], f"{task['title']} {task['objective']} {phase.key}", task_id=task["id"],
             include_shared=cfg.share_memory))
         extra = ""
-        if phase.role == "fixer":
+        if phase.role == "fixer" and task["metadata"].get("fix_all_issues"):
+            extra = ("The user requested a revision: address every issue in the latest review (all severities) and "
+                     "the user's note in the revision request, plus any failing tests. Remove unwanted files you find.")
+        elif phase.role == "fixer":
             extra = ("Address only confirmed issues of severity blocker/major from the latest review, and any failing "
                      "tests in the latest test report.")
         prompt = prompts.build(phase, task, instructions=self.forge.projects.trusted_instructions(task["project_id"]),
@@ -618,6 +622,8 @@ class Engine:
                 self.forge.bus.emit("worktree.no_changes", f"{phase.key} made no file changes", project_id=pid,
                                     task_id=tid, run_id=run_id, level="warn")
         s = res.structured or {}
+        if phase.key == "fix" and task["metadata"].get("fix_all_issues"):
+            self.forge.tasks.update_fields(tid, metadata={**task["metadata"], "fix_all_issues": False})
         if phase.schema == "plan":
             self.forge.memory.add(pid, "decision", f"Plan for: {task['title'][:120]}",
                                   s.get("summary", "") + "\nSteps: " + "; ".join(s.get("steps", [])[:12]),
@@ -891,6 +897,32 @@ class Engine:
         elif kind == "spending" and approve and task["state"] == S.BLOCKED.value:
             self._to(task, S.READY, "spending limit acknowledged (limit itself unchanged)")
         return a
+
+    def request_revision(self, task_id: str, note: str = "") -> dict:
+        """User sends the latest review (all severities) plus a note back to the fix phase.
+
+        Only from AWAITING_APPROVAL (merge / unresolved review). Bounded: at most
+        MAX_USER_REVISIONS per task, on top of the automatic review cycles."""
+        task = self.forge.tasks.get(task_id)
+        if task["state"] != S.AWAITING_APPROVAL.value:
+            raise InvalidTransition("revisions can only be requested while a task awaits approval")
+        wf = wfmod.get(task["workflow"])
+        if not wf.fix_phase:
+            raise ValueError(f"workflow {wf.key} has no fix phase")
+        meta = task["metadata"]
+        used = int(meta.get("user_revisions", 0))
+        if used >= MAX_USER_REVISIONS:
+            raise ValueError(f"revision limit reached ({MAX_USER_REVISIONS} user-requested revisions)")
+        for a in self.forge.approvals.list(task_id=task_id, status="pending"):
+            self.forge.approvals.decide(a["id"], False, f"revision requested: {note}".strip())
+        self.forge.artifacts.add(task["project_id"], task_id, "revision_request", "Revision requested by user",
+                                 {"note": note, "instruction": "Address every issue in the latest review "
+                                  "(all severities, including minor and nit) and the user's note."})
+        self.forge.memory.add(task["project_id"], "user_decision", f"Revision requested: {task['title'][:120]}",
+                              note or "address all review issues", source_task_id=task_id, importance=0.9)
+        meta.update(user_revisions=used + 1, fix_all_issues=True)
+        return self._to(task, S.READY, "revision requested by user", phase="fix", metadata=meta,
+                        review_cycle=task["review_cycle"] + 1)
 
     # --- decomposition ---------------------------------------------------------------
     def _decompose(self, task: dict, subtasks: list[dict]) -> None:
