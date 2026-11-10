@@ -49,6 +49,14 @@ Real records live in `~/.forge/forge.db` (projects `handoff-demo`, `R4`); view t
 * `forge run` executes in the foreground when no `forge serve` engine is running. Two
   engines never run at once (engine lock); a second process only enqueues.
 
+* **Disk space**: on 2026-11-10 the data volume was 98% full (4.1 GiB free), which made
+  the whole machine slow (macOS cache purging at high CPU). Forge itself uses ~180 MB
+  (`.venv`, `web/node_modules`, `~/.forge`). Free space before long agent runs.
+* A read-only Codex self-review of Forge's core (`forge-self` project, task
+  `t_cb9f201194f5`, `gpt-6.1-sol` high) stalled with no output for 15+ minutes under that
+  load and was cancelled via `forge cancel`. Re-run it when the machine is healthy:
+  `forge run forge-self "<review prompt>" --workflow analyze --read-only --route analyze=codex:gpt-6.1-sol:high`.
+
 ## Exact next steps (suggested)
 
 1. Use Forge on a real project: `forge project add <path> --test-command "<cmd>"`, then
