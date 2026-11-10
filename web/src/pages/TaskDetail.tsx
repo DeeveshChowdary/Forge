@@ -33,7 +33,7 @@ export default function TaskDetail() {
   const pending = t.approvals.filter((a: any) => a.status === "pending");
   const isMock = t.runs.some((r: Run) => r.is_mock);
   const proposals = t.artifacts.filter((a: Artifact) => a.kind === "proposal");
-  const comparison = t.artifacts.find((a: Artifact) => a.kind === "comparison");
+  const comparison = [...t.artifacts].reverse().find((a: Artifact) => a.kind === "comparison");
 
   return (
     <div className="space-y-5">
@@ -118,7 +118,9 @@ function PhaseTimeline({ t, wf }: { t: any; wf: any }) {
         const runsFor = t.runs.filter((r: Run) => r.phase === p.key);
         const last = runsFor[runsFor.length - 1];
         const current = t.phase === p.key && !["COMPLETED", "FAILED", "CANCELLED"].includes(t.state);
-        const status = current ? (last?.state === "running" ? "running" : "current") : last ? last.state : doneAll ? "skipped" : "pending";
+        const computed = p.kind === "compare" && t.artifacts.some((a: Artifact) => a.kind === "comparison");
+        const status = current ? (last?.state === "running" ? "running" : "current") : last ? last.state
+          : computed ? "succeeded" : doneAll ? "skipped" : "pending";
         const cls = status === "running" || status === "current" ? "border-orange-500 bg-orange-50 dark:bg-orange-950/40"
           : status === "succeeded" ? "border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30"
           : status === "failed" ? "border-red-400 bg-red-50 dark:bg-red-950/30" : "border-zinc-200 dark:border-zinc-800";
@@ -274,7 +276,7 @@ export function Proposals({ proposals, comparison }: { proposals: Artifact[]; co
         })}
       </div>
       {pair && (
-        <Card title="Differences (computed by Forge, deterministic text overlap)">
+        <Card title="Differences (computed by Forge: deterministic word overlap, not a judgement of quality)">
           <div className="mb-3 flex flex-wrap gap-2 text-xs"><Badge>title similarity {pair.title_similarity}</Badge><Badge>summary similarity {pair.summary_similarity}</Badge><Badge tone="green">{pair.agreeing_steps.length} agreeing step(s)</Badge></div>
           <div className="grid gap-4 md:grid-cols-2">
             <div><h3 className="mb-1 text-sm font-medium">Only in proposal A</h3><ul className="list-disc pl-5 text-sm">{pair.only_a_steps.map((s: string, i: number) => <li key={i}>{s}</li>)}{!pair.only_a_steps.length && <li className="muted">none</li>}</ul>

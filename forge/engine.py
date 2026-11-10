@@ -812,7 +812,8 @@ class Engine:
         for a in self.forge.artifacts.list(task_id=task["id"], kind="proposal"):
             run = self.forge.db.one("SELECT provider, model, resolved_model, effort FROM runs WHERE id=?", (a["run_id"],)) or {}
             props.append({"artifact_id": a["id"], "run_id": a["run_id"], **run, "proposal": a.get("data") or {}})
-        comparison = compare_proposals(props)
+        root = Path(self.forge.projects.get(task["project_id"])["root_path"])
+        comparison = compare_proposals(props, root)
         self.forge.artifacts.add(task["project_id"], task["id"], "comparison",
                                  f"Comparison of {len(props)} independent proposals", comparison)
 
@@ -971,48 +972,84 @@ def _test_summary(output: str) -> str:
     return tail[0][:200] if tail else ""
 
 
-_TOK = re.compile(r"[a-z0-9]{3,}")
+_TOK = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "then", "than", "each", "any", "all", "are", "was",
+    "were", "will", "would", "should", "must", "may", "can", "not", "but", "its", "their", "those", "these", "such",
+    "use", "using", "used", "via", "per", "also", "only", "both", "before", "after", "when", "where", "which", "what",
+    "how", "other", "more", "most", "less", "there", "here", "have", "has", "had", "been", "being", "does", "did",
+    "record", "records", "including", "include", "includes", "between", "within", "without", "about", "over",
+}
+_PATH = re.compile(r"(?<![\w/])((?:[\w.-]+/)+(?:[\w.-]+\.(?:md|json|py|csv|bib|toml|txt|yaml|yml|ts|tsx))?|"
+                   r"[\w.-]+\.(?:md|json|py|csv|bib|toml|txt|yaml|yml))")
+
+
+def _stem(t: str) -> str:
+    for suf, rep in (("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")):
+        if len(t) > len(suf) + 3 and t.endswith(suf):
+            return t[: -len(suf)] + rep
+    return t
 
 
 def _toks(s: str) -> set[str]:
-    return set(_TOK.findall(s.lower()))
+    return {_stem(t) for t in _TOK.findall(s.lower().replace(".", " ")) if len(t) >= 3 and t not in _STOPWORDS}
 
 
 def _sim(a: str, b: str) -> float:
+    """Overlap coefficient of content words: robust to one text being much longer."""
     x, y = _toks(a), _toks(b)
-    return len(x & y) / len(x | y) if x and y else 0.0
+    return len(x & y) / min(len(x), len(y)) if x and y else 0.0
 
 
-def compare_proposals(props: list[dict]) -> dict:
-    """Deterministic comparison: overlapping vs. unique steps, risks, evidence."""
-    out: dict[str, Any] = {"proposals": props, "pairs": []}
+def _paths(items: list[str], root: Path | None) -> set[str]:
+    """File paths cited in evidence text; with a root, only paths that actually exist count."""
+    out: set[str] = set()
+    for it in items:
+        for m in _PATH.findall(it):
+            m = m.rstrip("/.,;:")
+            if m and (root is None or (root / m).exists()):
+                out.add(m)
+    return out
+
+
+STEP_MATCH = 0.2
+
+
+def compare_proposals(props: list[dict], root: Path | None = None) -> dict:
+    """Deterministic comparison of independent proposals.
+
+    Steps are paired by mutual best content-word overlap (light stemming) above
+    STEP_MATCH; evidence is compared by cited file paths that exist in the project.
+    This measures wording overlap, not quality or correctness."""
+    out: dict[str, Any] = {"proposals": props, "pairs": [],
+                           "method": f"mutual-best content-word overlap ≥ {STEP_MATCH}; evidence = existing cited paths"}
     for i in range(len(props)):
         for j in range(i + 1, len(props)):
             a, b = props[i]["proposal"], props[j]["proposal"]
-            agreements, used = [], set()
-            for sa in a.get("steps", []):
-                best, bj = 0.0, None
-                for k, sb in enumerate(b.get("steps", [])):
-                    if k in used:
-                        continue
-                    v = _sim(sa, sb)
-                    if v > best:
-                        best, bj = v, k
-                if bj is not None and best >= 0.3:
-                    used.add(bj)
-                    agreements.append({"a": sa, "b": b["steps"][bj], "similarity": round(best, 2)})
-            matched_a = {x["a"] for x in agreements}
-            ev_a, ev_b = set(a.get("evidence", [])), set(b.get("evidence", []))
+            sa, sb = a.get("steps", []), b.get("steps", [])
+            m = [[_sim(x, y) for y in sb] for x in sa]
+            agreements, used_a, used_b = [], set(), set()
+            for ia in range(len(sa)):
+                if not sb:
+                    break
+                jb = max(range(len(sb)), key=lambda k: m[ia][k])
+                best_for_b = max(range(len(sa)), key=lambda k: m[k][jb])
+                if best_for_b == ia and m[ia][jb] >= STEP_MATCH and jb not in used_b:
+                    used_a.add(ia)
+                    used_b.add(jb)
+                    agreements.append({"a": sa[ia], "b": sb[jb], "similarity": round(m[ia][jb], 2)})
+            ev_a, ev_b = _paths(a.get("evidence", []), root), _paths(b.get("evidence", []), root)
+            ra, rb = a.get("risks", []), b.get("risks", [])
             out["pairs"].append({
                 "a": props[i]["run_id"], "b": props[j]["run_id"],
                 "title_similarity": round(_sim(a.get("title", ""), b.get("title", "")), 2),
                 "summary_similarity": round(_sim(a.get("summary", ""), b.get("summary", "")), 2),
                 "agreeing_steps": agreements,
-                "only_a_steps": [s for s in a.get("steps", []) if s not in matched_a],
-                "only_b_steps": [s for k, s in enumerate(b.get("steps", [])) if k not in used],
+                "only_a_steps": [x for k, x in enumerate(sa) if k not in used_a],
+                "only_b_steps": [x for k, x in enumerate(sb) if k not in used_b],
                 "shared_evidence": sorted(ev_a & ev_b), "only_a_evidence": sorted(ev_a - ev_b),
                 "only_b_evidence": sorted(ev_b - ev_a),
-                "only_a_risks": [r for r in a.get("risks", []) if all(_sim(r, x) < 0.3 for x in b.get("risks", []))],
-                "only_b_risks": [r for r in b.get("risks", []) if all(_sim(r, x) < 0.3 for x in a.get("risks", []))],
+                "only_a_risks": [r for r in ra if all(_sim(r, x) < STEP_MATCH for x in rb)],
+                "only_b_risks": [r for r in rb if all(_sim(r, x) < STEP_MATCH for x in ra)],
             })
     return out

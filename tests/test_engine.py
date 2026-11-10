@@ -369,3 +369,21 @@ def test_commit_all_skips_new_bytecode(tmp_path):
     gitops.commit_all(repo, "c")
     files = gitops.git(repo, "ls-files").split()
     assert "m.py" in files and not any(f.endswith(".pyc") for f in files)
+
+
+def test_compare_proposals_pairs_steps_and_real_evidence(tmp_path):
+    from forge.engine import compare_proposals
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "PLAN.md").write_text("x")
+    a = {"title": "Prior-art review", "summary": "Finish the literature review",
+         "steps": ["Snowball backward and forward citations from the priority papers",
+                   "Write a research decision about the next milestone"],
+         "evidence": ["docs/PLAN.md says the review is incomplete", "methods/limitations are unknown"], "risks": []}
+    b = {"title": "Review then decide", "summary": "Complete the review",
+         "steps": ["Produce a research decision for the milestone", "Snowball citations of priority papers",
+                   "Build a prototype"], "evidence": ["See docs/PLAN.md.", "docs/MISSING.md"], "risks": []}
+    c = compare_proposals([{"run_id": "r1", "proposal": a}, {"run_id": "r2", "proposal": b}], tmp_path)["pairs"][0]
+    assert len(c["agreeing_steps"]) == 2
+    assert c["only_b_steps"] == ["Build a prototype"]
+    assert c["shared_evidence"] == ["docs/PLAN.md"]
+    assert c["only_a_evidence"] == [] and c["only_b_evidence"] == []  # non-existent / prose paths ignored
