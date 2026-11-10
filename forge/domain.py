@@ -31,7 +31,8 @@ S = TaskState
 TRANSITIONS: dict[TaskState, set[TaskState]] = {
     S.CREATED: {S.PLANNING, S.READY, S.BLOCKED, S.CANCELLED, S.PAUSED},
     # PLANNING may loop to READY for the next phase; it is also an active phase.
-    S.PLANNING: {S.READY, S.FAILED, S.BLOCKED, S.PAUSED, S.CANCELLED, S.AWAITING_APPROVAL, S.COMPLETED},
+    S.PLANNING: {S.READY, S.EXECUTING, S.TESTING, S.REVIEWING, S.FAILED, S.BLOCKED, S.PAUSED, S.CANCELLED,
+                 S.AWAITING_APPROVAL, S.COMPLETED},
     S.READY: {S.PLANNING, S.EXECUTING, S.TESTING, S.REVIEWING, S.BLOCKED, S.PAUSED, S.CANCELLED,
               S.AWAITING_APPROVAL, S.COMPLETED, S.FAILED},
     S.EXECUTING: {S.READY, S.TESTING, S.REVIEWING, S.FAILED, S.BLOCKED, S.PAUSED, S.CANCELLED,
@@ -40,8 +41,8 @@ TRANSITIONS: dict[TaskState, set[TaskState]] = {
                 S.AWAITING_APPROVAL, S.COMPLETED},
     S.REVIEWING: {S.READY, S.EXECUTING, S.COMPLETED, S.FAILED, S.PAUSED, S.CANCELLED,
                   S.AWAITING_APPROVAL},
-    S.AWAITING_APPROVAL: {S.READY, S.COMPLETED, S.FAILED, S.CANCELLED, S.PAUSED},
-    S.BLOCKED: {S.READY, S.CANCELLED, S.FAILED, S.PAUSED},
+    S.AWAITING_APPROVAL: {S.READY, S.COMPLETED, S.FAILED, S.CANCELLED, S.PAUSED, S.BLOCKED},
+    S.BLOCKED: {S.READY, S.CANCELLED, S.FAILED, S.PAUSED, S.COMPLETED},
     S.PAUSED: {S.READY, S.CREATED, S.BLOCKED, S.AWAITING_APPROVAL, S.CANCELLED},
     S.FAILED: {S.READY},          # explicit user retry only
     S.COMPLETED: set(),
@@ -108,6 +109,9 @@ class GlobalSettings(BaseModel):
     codex_path: str = ""      # override auto-detection
     claude_path: str = ""
     claude_models: list[str] = Field(default_factory=lambda: ["sonnet", "opus", "haiku"])
+    codex_ignore_user_config: bool = True   # reproducible, isolated codex runs (auth still from CODEX_HOME)
+    enable_mock_provider: bool = False      # deterministic mock agents (always labelled as mock)
+    disabled_providers: list[str] = Field(default_factory=list)
     # Paid-API adapters do not exist yet; this flag is the switch that must be flipped
     # by the user (and still requires per-project allow_paid_api) before one is used.
     paid_api_globally_allowed: bool = False

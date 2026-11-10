@@ -21,6 +21,19 @@ def app(forge_home):
     f.close()
 
 
+@pytest.fixture
+async def mock_app(forge_home):
+    """Forge with only the deterministic mock provider enabled and verified."""
+    from forge.app import Forge
+
+    f = Forge.create(discover=False)
+    f.save_settings({"enable_mock_provider": True, "disabled_providers": ["claude_code", "codex"]})
+    f.registry.refresh()
+    await f.registry.probe_all()
+    yield f
+    f.close()
+
+
 def make_repo(path: Path, files: dict[str, str] | None = None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",

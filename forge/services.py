@@ -463,8 +463,10 @@ class TaskService:
 
     def retry(self, tid: str) -> dict:
         t = self.get(tid)
-        if t["state"] != TaskState.FAILED.value:
-            raise InvalidTransition("only FAILED tasks can be retried")
+        if t["state"] not in (TaskState.FAILED.value, TaskState.BLOCKED.value):
+            raise InvalidTransition("only FAILED or BLOCKED tasks can be retried")
+        if t["phase"] == "__await_children__":
+            raise InvalidTransition("task is waiting for its subtasks")
         return self.transition(tid, TaskState.READY, "retry requested by user", error=None, attempts=0)
 
 

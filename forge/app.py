@@ -35,12 +35,10 @@ class Forge:
         return f
 
     def _wire(self, *, discover: bool) -> None:
-        try:
-            from .providers.registry import ProviderRegistry
-            from .router import Router
-            from .engine import Engine
-        except ImportError:  # during early bootstrap only
-            return
+        from .engine import Engine
+        from .providers.registry import ProviderRegistry
+        from .router import Router
+
         self.registry = ProviderRegistry(self)
         self.router = Router(self)
         self.engine = Engine(self)
