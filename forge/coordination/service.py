@@ -53,6 +53,7 @@ class ExternalTaskRequest(BaseModel):
     review_depth: Literal["standard", "independent"] = "standard"
     approval_policy: Literal["risky", "never_merge"] = "risky"
     read_only: bool = False
+    collaboration: Literal["auto", "cross_model", "independent_research", "implement_review"] | None = None
 
 
 class Feedback(BaseModel):
@@ -275,7 +276,7 @@ class CoordinationService:
             raise Conflict(f"project {p['name']} is {p['status']}")
         needs_auth = cfg.require_authorization if require_authorization is None else require_authorization
         meta = {"source": source, "source_ref": source_ref, "submitted_by": principal.name,
-                "external": True}
+                "external": True, **({"collaboration": req.collaboration} if req.collaboration else {})}
         try:
             t = submit_task(
                 self.forge, p["id"], title=clean_inbound(req.title, 200), objective=clean_inbound(req.objective, 8000),
@@ -285,6 +286,12 @@ class CoordinationService:
                 metadata=meta, start=not needs_auth)
         except PermissionError as e:
             raise NotAllowed(str(e))
+        except ValueError as e:   # includes collaboration.PolicyError subclasses raised as Exception below
+            raise CoordinationError(str(e))
+        except Exception as e:  # noqa: BLE001
+            if type(e).__name__ == "PolicyError":
+                raise CoordinationError(str(e))
+            raise
         except KeyError as e:
             raise CoordinationError(str(e))
         if needs_auth:

@@ -14,6 +14,7 @@ Guarantees:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shlex
@@ -23,7 +24,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import gitops, integrations, prompts, schemas
+from . import collaboration, gitops, integrations, preflight, prompts, schemas
 from . import workflows as wfmod
 from .db import dumps, loads, new_id, now
 from .domain import ACTIVE, TERMINAL, InvalidTransition, ProjectConfig, TaskState
@@ -42,7 +43,10 @@ FINISH = "__finish__"
 AWAIT_CHILDREN = "__await_children__"
 BLOCKING_SEVERITIES = {"blocker", "major"}
 MAX_USER_REVISIONS = 3
-SCHEMA_ARTIFACT_KIND = {"plan": "plan", "handoff": "handoff", "review": "review", "report": "report",
+MAX_CONTINUATIONS = 1   # automatic continuations per phase after a deterministic limit (never identical retries)
+SCHEMA_ARTIFACT_KIND = {"research_report": "research_report", "novelty": "novelty", "cross_review": "cross_review",
+                        "decision": "decision",
+                        "plan": "plan", "handoff": "handoff", "review": "review", "report": "report",
                         "proposal": "proposal"}
 
 
@@ -66,11 +70,56 @@ def submit_task(forge: "Forge", project_id: str, *, title: str, objective: str, 
     if p["status"] != "active":
         raise PermissionError(f"project {p['name']} is {p['status']}; resume it first")
     milestone = kw.pop("as_milestone", False)
+    meta = dict(kw.pop("metadata", None) or {})
+    policy = meta.get("collaboration") or wf.default_collaboration
+    meta["collaboration"] = policy
+    overrides = kw.get("routing_overrides") or {}
+    collaboration.validate_submission(policy, wf, overrides)
+    budget = {**ProjectConfig.from_raw(p["config"]).limits.model_dump(), **(kw.get("budget") or {})}
+    if forge.router is not None and not meta.get("skip_preflight"):
+        pf = preflight.run(forge, p["id"], wf, objective, policy=policy,
+                           mode=kw.get("routing_mode") or cfg.default_routing_mode,
+                           complexity=kw.get("complexity", "medium"), overrides=overrides, budget=budget,
+                           metadata=meta)
+        meta["preflight"] = {k: pf[k] for k in ("warnings", "estimates", "sections", "recommend_decompose")}
+        meta["route_plan"] = pf["route_plan"]
+        if pf["blockers"]:
+            raise collaboration.PolicyError("collaboration policy cannot be satisfied: " + "; ".join(pf["blockers"]))
+    sections = preflight.split_sections(objective) if meta.get("decompose") == "sections" else []
+    if len(sections) >= 2:
+        return _submit_sections(forge, p, wf, title, objective, sections, meta, kw, milestone)
     t = forge.tasks.create(p["id"], title=title, objective=objective, workflow=wf.key,
-                           category=kw.pop("category", wf.category), **kw)
+                           category=kw.pop("category", wf.category), metadata=meta, **kw)
     if milestone:
         forge.projects.add_milestone(p["id"], title, objective[:500], task_id=t["id"])
     return t
+
+
+def _submit_sections(forge: "Forge", p: dict, wf: Workflow, title: str, objective: str,
+                     sections: list[tuple[str, str]], meta: dict, kw: dict, milestone: bool) -> dict:
+    """Deterministic decomposition: one dependent subtask per top-level objective section."""
+    start = kw.pop("start", True)
+    kw.pop("category", None)
+    parent = forge.tasks.create(p["id"], title=title, objective=objective, workflow=wf.key, category=wf.category,
+                                metadata={**meta, "decompose": "sections"}, start=False, **kw)
+    header = objective.split("##", 1)[0].strip()
+    ids: list[str] = []
+    for i, (st, body) in enumerate(sections[:12]):
+        child = forge.tasks.create(
+            p["id"], title=f"{title[:80]} — {st[:100]}", workflow=wf.key, category=wf.category,
+            objective=(f"{header}\n\n" if header else "") + f"## {st}\n\n{body}\n\n(Part {i + 1} of "
+                      f"{len(sections)} of parent task {parent['id']}; earlier parts' reports are in project memory.)",
+            depends_on=ids[-1:], parent_id=parent["id"],
+            metadata={k: v for k, v in meta.items() if k not in ("decompose", "preflight", "route_plan")},
+            start=start, **kw)
+        forge.projects.add_milestone(p["id"], child["title"], body[:500], task_id=child["id"])
+        ids.append(child["id"])
+    forge.tasks.update_fields(parent["id"], phase=AWAIT_CHILDREN,
+                              metadata={**parent["metadata"], "children": ids})
+    forge.tasks.transition(parent["id"], S.BLOCKED, f"decomposed into {len(ids)} section subtasks")
+    if milestone:
+        forge.projects.add_milestone(p["id"], title, objective[:500], task_id=parent["id"])
+    return forge.tasks.get(parent["id"])
 
 
 class Engine:
@@ -279,21 +328,48 @@ class Engine:
             return False
         return bool(re.search(r"claude|codex|pytest|python|node", cmd))
 
-    def _save_and_reset_partial(self, task: dict, why: str) -> None:
+    def _save_and_reset_partial(self, task: dict, why: str, *, run_id: str | None = None,
+                                keep: bool = False) -> dict | None:
+        """Preserve uncommitted work as a checkpoint (git ref + diff artifact), then reset the worktree unless
+        `keep` (continuation). The task branch itself is never modified, so the worktree cannot be corrupted."""
         wt = task.get("worktree_path")
         if not wt or not Path(wt).is_dir():
-            return
+            return None
         try:
             gitops.git(wt, "add", "-A")
             partial = gitops.git(wt, "diff", "--cached", "--no-color", check=False)
+            info = None
             if partial.strip():
+                files = gitops.git(wt, "diff", "--cached", "--name-only", check=False).split()
+                tree = gitops.git(wt, "write-tree").strip()
+                head = gitops.head_commit(wt)
+                sha = gitops.git(wt, "commit-tree", tree, "-p", head, "-m",
+                                 f"forge checkpoint: {why} ({task['phase']})", identity=True).strip()
+                n = len(self.forge.artifacts.list(task_id=task["id"], kind="checkpoint")) + 1
+                ref = f"refs/forge/checkpoints/{task['id']}/{n}"
+                gitops.git(wt, "update-ref", ref, sha)
+                info = {"ref": ref, "sha": sha, "files": files, "phase": task["phase"], "reason": why,
+                        "run_id": run_id, "lines_added": sum(1 for l in partial.splitlines()  # noqa: E741
+                                                             if l.startswith("+") and not l.startswith("+++"))}
                 self.forge.artifacts.add(task["project_id"], task["id"], "diff",
-                                         f"Partial changes discarded ({why}) in phase {task['phase']}", partial)
-            gitops.git(wt, "reset", "-q", "--hard", "HEAD")
-            gitops.git(wt, "clean", "-qfd")
+                                         f"Partial changes preserved ({why}) in phase {task['phase']} — checkpoint {n}",
+                                         partial, run_id=run_id)
+                self.forge.artifacts.add(task["project_id"], task["id"], "checkpoint",
+                                         f"Checkpoint {n}: {len(files)} file(s) from {task['phase']} ({why})", info,
+                                         run_id=run_id)
+                self.forge.bus.emit("worktree.checkpoint", f"Saved checkpoint {n} ({len(files)} files) at {ref}",
+                                    project_id=task["project_id"], task_id=task["id"], run_id=run_id,
+                                    data={"ref": ref, "sha": sha, "files": files[:50]})
+            if keep:
+                gitops.git(wt, "reset", "-q")          # unstage only; files stay for the continuation
+            else:
+                gitops.git(wt, "reset", "-q", "--hard", "HEAD")
+                gitops.git(wt, "clean", "-qfd")
+            return info
         except gitops.GitError as e:
-            self.forge.bus.emit("worktree.error", f"could not reset worktree: {e}", task_id=task["id"],
+            self.forge.bus.emit("worktree.error", f"could not checkpoint/reset worktree: {e}", task_id=task["id"],
                                 project_id=task["project_id"], level="error")
+            return None
 
     # ------------------------------------------------------------------ driving
     async def _drive_guarded(self, tid: str) -> None:
@@ -426,10 +502,27 @@ class Engine:
         i = keys.index(phase.key)
         return keys[i + 1] if i + 1 < len(keys) else FINISH
 
+    def _used_providers(self, task: dict) -> tuple[dict[str, set[str]], set[str]]:
+        by_role: dict[str, set[str]] = {}
+        for r in self.forge.db.query("SELECT role, provider FROM runs WHERE task_id=? AND kind='agent' AND "
+                                     "state='succeeded'", (task["id"],)):
+            by_role.setdefault(r["role"], set()).add(r["provider"])
+        return by_role, set().union(*by_role.values()) if by_role else set()
+
     def _route(self, task: dict, phase: Phase, *, avoid: list[str] | None = None,
-               exclude: list[tuple[str, str]] | None = None, override: dict | None = None) -> Any:
+               exclude: list[tuple[str, str]] | None = None, override: dict | None = None,
+               fanout_index: int | None = None, fanout_used: list[str] | None = None) -> Any:
         overrides = task["routing_overrides"] or {}
+        policy = task["metadata"].get("collaboration", "auto")
+        by_role, used_all = self._used_providers(task)
+        cons = collaboration.constraint_for(policy, wfmod.get(task["workflow"]), phase, used_by_role=by_role,
+                                            used_all=used_all, fanout_index=fanout_index, fanout_used=fanout_used)
+        cont = task["metadata"].get("continuation") or {}
+        if cont.get("phase") == phase.key and cont.get("provider") and fanout_index in (None, cont.get("index")):
+            override = {"provider": cont["provider"], "model": cont["model"], "effort": cont.get("effort")}
         ov = override or overrides.get(phase.key)
+        if isinstance(ov, list):
+            ov = ov[fanout_index] if fanout_index is not None and fanout_index < len(ov) else None
         if ov is None and phase.key == "fix":
             impl = next((p.key for p in wfmod.get(task["workflow"]).phases if p.writes), None)
             ov = overrides.get(impl) if impl else None
@@ -437,6 +530,8 @@ class Engine:
             ov = None
         if ov is None and overrides.get("*"):
             ov = overrides["*"]
+        if policy == "manual" and not ov:
+            raise RoutingError(f"manual collaboration policy: no provider/model assigned to phase {phase.key}")
         mode = task["routing_mode"]
         escalation = 0
         if mode == "economy":
@@ -445,8 +540,12 @@ class Engine:
                            category=task["category"], complexity=task["complexity"], criticality=task["criticality"],
                            mode=mode, override=ov, avoid_providers=avoid or [],
                            independent=task["review_depth"] == "independent" or mode == "max_quality",
-                           escalation=escalation, exclude=exclude or [])
-        return self.forge.router.route(ctx)
+                           escalation=escalation, exclude=exclude or [],
+                           require_providers=cons.require, forbid_providers=cons.forbid)
+        d = self.forge.router.route(ctx)
+        if cons.reason:
+            d.reasons.insert(0, f"Collaboration policy — {cons.reason}")
+        return d
 
     def _writer_providers(self, task: dict) -> list[str]:
         rows = self.forge.db.query(
@@ -462,7 +561,7 @@ class Engine:
                 total += float(u["cost_usd"])
         return total
 
-    def _handoffs(self, task: dict, phase: Phase) -> list[dict]:
+    def _handoffs(self, task: dict, phase: Phase, provider: str | None = None) -> list[dict]:
         arts = self.forge.artifacts.list(task_id=task["id"])
         latest: dict[str, dict] = {}
         for a in arts:
@@ -476,9 +575,23 @@ class Engine:
             want = ["plan", "handoff", "test_report", "external_feedback"]
         elif phase.role in ("analyst", "researcher"):
             want = ["report", "handoff", "test_report", "external_feedback"]
+        elif phase.role in ("investigator",):
+            want = ["research_report", "external_feedback"]
         else:
-            want = []
+            want = ["external_feedback"]
         out = [latest[k] for k in want if k in latest]
+        if phase.role in ("assessor", "cross_reviewer", "decider"):
+            reports = [a for a in arts if a["kind"] in ("research_report", "novelty", "cross_review")]
+            if phase.role == "cross_reviewer" and provider:
+                runs = {r["id"]: r["provider"] for r in self.forge.db.query(
+                    "SELECT id, provider FROM runs WHERE task_id=?", (task["id"],))}
+                indep = [a for a in reports if a["kind"] == "research_report" and runs.get(a["run_id"])
+                         and a["title"].startswith("independent_analysis")]
+                other = [a for a in indep if runs.get(a["run_id"]) != provider]
+                own = [a for a in indep if runs.get(a["run_id"]) == provider]
+                reports = [a for a in reports if a["title"].startswith("literature_review")] + own[-1:] + [
+                    {**a, "title": "OTHER MODEL'S ANALYSIS (review this): " + a["title"]} for a in other[-1:]]
+            out = reports + out
         if phase.role == "reviewer" and task["base_commit"] and task["worktree_path"]:
             d = gitops.diff(task["worktree_path"], task["base_commit"], "HEAD")
             out.append({"kind": "diff", "title": f"Cumulative diff {task['base_commit'][:10]}..HEAD",
@@ -526,6 +639,15 @@ class Engine:
             task["project_id"], f"{task['title']} {task['objective']} {phase.key}", task_id=task["id"],
             include_shared=cfg.share_memory))
         extra = ""
+        cont = task["metadata"].get("continuation") or {}
+        resume_session = None
+        if cont.get("phase") == phase.key and cont.get("provider") == decision.provider:
+            resume_session = cont.get("session_id")
+            extra += ("\n\n## CONTINUATION\nThe previous attempt of this phase stopped at its step limit after "
+                      f"{cont.get('steps_used', '?')} steps. Its partial work is already present in the working tree "
+                      f"(files: {', '.join(cont.get('files', [])[:20]) or 'none'}). Do NOT re-read everything or redo "
+                      "completed work: check what exists, finish the remaining deliverables, and return the required "
+                      "output.\n")
         if phase.role == "fixer" and task["metadata"].get("fix_all_issues"):
             extra = ("The user requested a revision: address every issue in the latest review (all severities) and "
                      "the user's note in the revision request, plus any failing tests. Remove unwanted files you find.")
@@ -533,11 +655,12 @@ class Engine:
             extra = ("Address only confirmed issues of severity blocker/major from the latest review, and any failing "
                      "tests in the latest test report.")
         prompt = prompts.build(phase, task, instructions=self.forge.projects.trusted_instructions(task["project_id"]),
-                               memory=memory, handoffs=self._handoffs(task, phase), read_only=read_only,
+                               memory=memory, handoffs=self._handoffs(task, phase, decision.provider), read_only=read_only,
                                test_command=cfg.test_command.replace("{python}", sys.executable),
                                schema=schema, extra=extra + prompts.provenance(task))
         remaining = int(limits.get("max_task_runtime_s", 7200)) - int(now() - (task["started_at"] or now()))
-        timeout = max(1, min(int(limits.get("max_runtime_s", 1800)), remaining))
+        max_turns, max_runtime = self.phase_limits(task, phase)
+        timeout = max(1, min(max_runtime, remaining))
         attempt = int(task["attempts"]) + 1
         with self.forge.db.tx() as c:
             c.execute(
@@ -569,9 +692,10 @@ class Engine:
             allow_shell=(not read_only) and cfg.permissions.allow_agent_shell,
             shell_allowlist=self._shell_allowlist(cfg), allow_network=cfg.permissions.allow_network_tools,
             output_schema=schema, system_append=prompts.system_prompt(phase, bool(schema)), timeout_s=timeout,
-            max_turns=int(limits.get("max_turns", 40)), log_path=log_dir / f"{run_id}.log",
+            max_turns=max_turns, log_path=log_dir / f"{run_id}.log", resume_session_id=resume_session,
             mcp_config_path=integrations.mcp_config_for(self.forge, task["project_id"]),
             metadata={"mock": task["metadata"].get("mock"), "attempt": attempt, "review_cycle": task["review_cycle"],
+                      "continuation": bool(cont.get("phase") == phase.key),
                       "objective": task["objective"], "acceptance_criteria": task["acceptance_criteria"]},
         )
         cancel = self.cancel_events.setdefault(task["id"], asyncio.Event())
@@ -582,6 +706,7 @@ class Engine:
         if res.ok and task["metadata"].get("mock", {}).get("billed_cost_usd"):
             res.usage.cost_usd = float(task["metadata"]["mock"]["billed_cost_usd"])
             res.usage.cost_kind, res.usage.billing = "billed", "api"
+        res.usage.max_turns, res.usage.max_runtime_s = max_turns, timeout   # type: ignore[attr-defined]
         state = "succeeded" if res.ok else ("cancelled" if res.error_kind == "cancelled" else "failed")
         if self._shutting_down and res.error_kind == "cancelled":
             state = "interrupted"
@@ -622,6 +747,14 @@ class Engine:
                 self.forge.bus.emit("worktree.no_changes", f"{phase.key} made no file changes", project_id=pid,
                                     task_id=tid, run_id=run_id, level="warn")
         s = res.structured or {}
+        if phase.report:
+            self._write_report(task, phase, s, run_id, label)
+        if (task["metadata"].get("continuation") or {}).get("phase") == phase.key:
+            self.forge.tasks.update_fields(tid, metadata={**task["metadata"], "continuation": None})
+        if phase.schema == "decision" and s.get("decision"):
+            self.forge.memory.add(pid, "decision", f"Research decision {s['decision']}: {task['title'][:100]}",
+                                  s.get("justification", "")[:1500], source_task_id=tid, source_run_id=run_id,
+                                  importance=0.9)
         if phase.key == "fix" and task["metadata"].get("fix_all_issues"):
             self.forge.tasks.update_fields(tid, metadata={**task["metadata"], "fix_all_issues": False})
         if phase.schema == "plan":
@@ -675,12 +808,51 @@ class Engine:
                 return None
             self._check_controls(task)  # raises Stop for pause/cancel
             return None
-        self._save_and_reset_partial(task, f"failed {phase.key}")
         err = res.error or "unknown error"
-        self.forge.memory.add(task["project_id"], "failure", f"{phase.key} failed ({res.error_kind})", err[:2000],
-                              source_task_id=task["id"], importance=0.6)
-        if res.error_kind in ("auth", "rate_limit", "model_unavailable"):
+        cls = classify_failure(res.error_kind)
+        deterministic = cls == "limit_exhausted"
+        conts = [f for f in task["metadata"].get("failures", []) if f.get("phase") == phase.key
+                 and f.get("action") == "continuation"]
+        run = self.forge.db.one("SELECT id, provider, model, effort, session_id, usage FROM runs WHERE task_id=? "
+                                "AND phase=? ORDER BY started_at DESC LIMIT 1", (task["id"], phase.key)) or {}
+        steps = loads(run.get("usage"), {}).get("turns")
+        can_continue = (deterministic and phase.kind == "agent" and len(conts) < MAX_CONTINUATIONS)
+        cp = self._save_and_reset_partial(task, f"{res.error_kind or 'failed'} in {phase.key}", run_id=run.get("id"),
+                                          keep=can_continue)
+        progress = bool(cp) or bool(run.get("session_id"))
+        action = "continuation" if (can_continue and progress) else (
+            "blocked" if cls == "needs_user" else ("stop" if deterministic else "retry"))
+        if deterministic and not progress:
+            self._save_and_reset_partial(task, "no progress")  # nothing to keep; make sure worktree is clean
+        record = {"phase": phase.key, "run_id": run.get("id"), "error_kind": res.error_kind, "classification": cls,
+                  "error": err[:500], "steps_used": steps, "limits": self.phase_limits(task, phase),
+                  "checkpoint": cp, "action": action, "at": now()}
+        meta = {**task["metadata"], "failures": [*task["metadata"].get("failures", []), record]}
+        self.forge.tasks.update_fields(task["id"], metadata=meta)
+        task = self.forge.tasks.get(task["id"])
+        self.forge.memory.add(task["project_id"], "failure", f"{phase.key} failed ({res.error_kind}, {cls})",
+                              err[:2000], source_task_id=task["id"], importance=0.6)
+        if action == "continuation":
+            meta["continuation"] = {"phase": phase.key, "provider": run.get("provider"), "model": run.get("model"),
+                                    "effort": run.get("effort"), "session_id": run.get("session_id"),
+                                    "files": (cp or {}).get("files", []), "steps_used": steps,
+                                    "checkpoint": (cp or {}).get("ref")}
+            self.forge.tasks.update_fields(task["id"], metadata=meta)
+            self.forge.bus.emit("task.continuation", f"{phase.key} hit its limit ({err}); continuing once from "
+                                f"checkpoint with the same agent and session (not an identical retry)",
+                                project_id=task["project_id"], task_id=task["id"], level="warn")
+            return phase.key
+        if cls == "needs_user":
             self._to(task, S.BLOCKED, f"{phase.key}: {res.error_kind} — user action needed", error=err[:2000])
+            return None
+        if deterministic:
+            lim = self.phase_limits(task, phase)
+            self._to(task, S.FAILED, f"{phase.key}: {err}; not retried automatically (deterministic limit)",
+                     error=f"{err} (limit {lim[0]} steps / {lim[1]}s for phase {phase.key}); "
+                           "raise the phase limit, narrow or decompose the objective, then retry",
+                     disposition=f"failed in {phase.key}: limit exhausted"
+                                 + ("; partial work preserved as checkpoints" if
+                                    any(f.get("checkpoint") for f in meta["failures"]) else ""))
             return None
         attempts = int(task["attempts"]) + 1
         max_retries = int(task["budget"].get("max_retries", 1))
@@ -692,6 +864,162 @@ class Engine:
         self._to(task, S.FAILED, f"{phase.key} failed after {attempts} attempt(s): {err[:300]}", error=err[:2000],
                  disposition=f"failed in {phase.key}")
         return None
+
+    # --- limits, reports, failure analysis, recovery -------------------------------------
+    def phase_limits(self, task: dict, phase: Phase) -> tuple[int, int]:
+        b = task["budget"] or {}
+        o = (b.get("phase_limits") or {}).get(phase.key, {})
+        turns = int(o.get("max_turns") or phase.max_turns or b.get("max_turns", 40))
+        runtime = int(o.get("max_runtime_s") or phase.max_runtime_s or b.get("max_runtime_s", 1800))
+        return turns, runtime
+
+    def _write_report(self, task: dict, phase: Phase, data: dict, run_id: str, label: str) -> None:
+        """Durable report: markdown + json in the task worktree, committed as a checkpoint on the task branch."""
+        from .reports import citation_check, render_report
+        root = self._cwd(task)
+        check = citation_check(data, root)
+        if check["unresolved"]:
+            self.forge.bus.emit("report.citations", f"{phase.key}: {len(check['unresolved'])} cited source(s) not found "
+                                "in the repository", project_id=task["project_id"], task_id=task["id"],
+                                run_id=run_id, level="warn", data={"unresolved": check["unresolved"][:20]})
+        if task["execution_mode"] == "read_only" or not task.get("worktree_path"):
+            return
+        idx = [p.key for p in wfmod.get(task["workflow"]).phases].index(phase.key) + 1
+        slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+        d = Path(task["worktree_path"]) / "forge-reports" / task["id"]
+        d.mkdir(parents=True, exist_ok=True)
+        stem = f"{idx:02d}-{phase.key}-{slug}"
+        (d / f"{stem}.json").write_text(json.dumps({"phase": phase.key, "agent": label, "data": data,
+                                                    "citation_check": check}, indent=1))
+        (d / f"{stem}.md").write_text(render_report(phase.key, label, task, data, check))
+        sha = gitops.commit_all(task["worktree_path"], f"forge({phase.key}): report by {label}")
+        if sha:
+            self.forge.bus.emit("worktree.commit", f"Committed {phase.key} report ({stem}.md) as {sha[:10]}",
+                                project_id=task["project_id"], task_id=task["id"], run_id=run_id, data={"sha": sha})
+
+    def failure_analysis(self, task: dict) -> dict:
+        """Derived from persisted rows, so it also works for tasks created before M10."""
+        runs = self.forge.db.query("SELECT id, phase, provider, model, state, error, usage, started_at, ended_at "
+                                   "FROM runs WHERE task_id=? ORDER BY started_at", (task["id"],))
+        failed = [r for r in runs if r["state"] == "failed"]
+        last = failed[-1] if failed else None
+        done = sorted({r["phase"] for r in runs if r["state"] == "succeeded"},
+                      key=lambda k: [r["phase"] for r in runs].index(k))
+        arts = self.forge.artifacts.list(task_id=task["id"])
+        recoverable = []
+        for a in arts:
+            if a["kind"] == "diff" and ("Partial" in a["title"]):
+                files = re.findall(r"^\+\+\+ b/(.+)$", a["content"], re.M)
+                added = sum(1 for l in a["content"].splitlines() if l.startswith("+") and not l.startswith("+++"))  # noqa: E741
+                recoverable.append({"artifact_id": a["id"], "title": a["title"], "files": files, "lines_added": added,
+                                    "run_id": a["run_id"]})
+        outputs = [{"artifact_id": a["id"], "kind": a["kind"], "title": a["title"]} for a in arts
+                   if a["kind"] in ("plan", "report", "research_report", "novelty", "cross_review", "decision",
+                                    "proposal", "review", "handoff")]
+        checkpoints = [{"artifact_id": a["id"], "title": a["title"], **(a.get("data") or {})} for a in arts
+                       if a["kind"] == "checkpoint"]
+        out: dict[str, Any] = {"completed_phases": done, "outputs": outputs, "recoverable": recoverable,
+                               "checkpoints": checkpoints, "failed": task["state"] == "FAILED"}
+        if last:
+            kind = "turn_limit" if "turn limit" in (last["error"] or "") or "step limit" in (last["error"] or "") else (
+                "timeout" if "timed out" in (last["error"] or "") else None)
+            cls = classify_failure(kind) if kind else "transient_or_unknown"
+            usage = loads(last["usage"], {})
+            same_errors = [r for r in failed if r["phase"] == last["phase"] and r["error"] == last["error"]]
+            out["last_failure"] = {
+                "phase": last["phase"], "run_id": last["id"], "agent": f"{last['provider']}/{last['model']}",
+                "error": last["error"], "classification": cls, "steps_used": usage.get("turns"),
+                "step_limit": usage.get("max_turns") or task["budget"].get("max_turns"),
+                "runtime_s": round((last["ended_at"] or now()) - last["started_at"]),
+                "runtime_limit_s": usage.get("max_runtime_s") or task["budget"].get("max_runtime_s"),
+                "identical_failures": len(same_errors)}
+            if task["state"] == "FAILED":
+                out["retry"] = ({"eligible": True, "requires": "a higher phase limit, a narrower objective, or "
+                                 "continuing from the latest checkpoint — an identical retry would fail the same way"}
+                                if cls == "limit_exhausted" else {"eligible": True, "requires": None})
+        return out
+
+    def retry_task(self, task_id: str, *, phase_max_turns: int | None = None, phase_max_runtime_s: int | None = None,
+                   continue_from_checkpoint: bool = False) -> dict:
+        task = self.forge.tasks.get(task_id)
+        if task["state"] not in (S.FAILED.value, S.BLOCKED.value):
+            raise InvalidTransition("only FAILED or BLOCKED tasks can be retried")
+        fa = self.failure_analysis(task)
+        lf = fa.get("last_failure") or {}
+        if lf.get("classification") == "limit_exhausted" and not (phase_max_turns or phase_max_runtime_s
+                                                                  or continue_from_checkpoint):
+            raise ValueError("this task failed on a deterministic limit; retry with a higher phase limit or "
+                             "continue_from_checkpoint (an identical retry would fail the same way)")
+        budget, meta = dict(task["budget"]), dict(task["metadata"])
+        phase = lf.get("phase") or task["phase"]
+        if phase_max_turns or phase_max_runtime_s:
+            pl = dict(budget.get("phase_limits") or {})
+            cur = dict(pl.get(phase) or {})
+            if phase_max_turns:
+                cur["max_turns"] = int(phase_max_turns)
+            if phase_max_runtime_s:
+                cur["max_runtime_s"] = int(phase_max_runtime_s)
+            pl[phase] = cur
+            budget["phase_limits"] = pl
+        if continue_from_checkpoint and task.get("worktree_path"):
+            src = (fa["checkpoints"][-1] if fa["checkpoints"] else None)
+            files: list[str] = []
+            if src:
+                gitops.git(task["worktree_path"], "checkout", src["sha"], "--", ".")
+                gitops.git(task["worktree_path"], "reset", "-q")
+                files = src.get("files", [])
+            elif fa["recoverable"]:
+                a = self.forge.artifacts.get(fa["recoverable"][-1]["artifact_id"])
+                p = self.forge.paths.scratch / f"{task_id}-resume.patch"
+                p.write_text(a["content"])
+                gitops.git(task["worktree_path"], "apply", str(p))
+                files = fa["recoverable"][-1]["files"]
+            run = self.forge.db.one("SELECT provider, model, effort, session_id, usage FROM runs WHERE id=?",
+                                    (lf.get("run_id"),)) or {}
+            meta["continuation"] = {"phase": phase, "provider": run.get("provider"), "model": run.get("model"),
+                                    "effort": run.get("effort"), "session_id": run.get("session_id"), "files": files,
+                                    "steps_used": lf.get("steps_used"), "checkpoint": (src or {}).get("ref")}
+        self.forge.tasks.update_fields(task_id, budget=budget, metadata=meta, phase=phase)
+        return self._to(task, S.READY, "retry requested by user"
+                        + (f" (phase {phase} limit {phase_max_turns} steps)" if phase_max_turns else "")
+                        + (" continuing from checkpoint" if continue_from_checkpoint else ""), error=None, attempts=0)
+
+    def request_recovery(self, task_id: str, artifact_id: str) -> dict:
+        task = self.forge.tasks.get(task_id)
+        a = self.forge.artifacts.get(artifact_id)
+        if a["task_id"] != task_id or a["kind"] not in ("diff", "checkpoint"):
+            raise ValueError("artifact is not a recoverable diff/checkpoint of this task")
+        return self.forge.approvals.request(
+            task["project_id"], task_id, "recovery", f"Recover partial work to a new branch ({a['title'][:80]})",
+            "Creates a new branch in the project repository from the task's base commit with these preserved "
+            "changes committed. Your working tree and existing branches are not touched.",
+            {"artifact_id": artifact_id})
+
+    def recover_to_branch(self, task_id: str, artifact_id: str) -> str:
+        task = self.forge.tasks.get(task_id)
+        project = self.forge.projects.get(task["project_id"])
+        root = Path(project["root_path"])
+        a = self.forge.artifacts.get(artifact_id)
+        n = len([x for x in gitops.git(root, "branch", "--list", f"forge/recovery-{task_id}*").split() if x.strip()]) + 1
+        name = f"recovery-{task_id}-{n}"
+        wt = gitops.create_worktree(root, self.forge.paths.worktrees / project["id"], name,
+                                    task["base_commit"] or "HEAD")
+        try:
+            if a["kind"] == "checkpoint":
+                gitops.git(wt.path, "checkout", a["data"]["sha"], "--", ".")
+            else:
+                p = self.forge.paths.scratch / f"{name}.patch"
+                p.write_text(a["content"])
+                gitops.git(wt.path, "apply", "--index", str(p))
+            sha = gitops.commit_all(wt.path, f"Recover partial work from Forge task {task_id} ({a['title'][:60]})")
+        finally:
+            gitops.remove_worktree(root, wt.path)
+        self.forge.bus.emit("task.recovered", f"Recovered {a['title'][:80]} to branch {wt.branch} ({(sha or '')[:10]})",
+                            project_id=project["id"], task_id=task_id, data={"branch": wt.branch, "sha": sha})
+        self.forge.memory.add(project["id"], "attempt", f"Recovered partial work of {task['title'][:80]}",
+                              f"branch {wt.branch} commit {(sha or '')[:10]}: {a['title']}", source_task_id=task_id,
+                              importance=0.6)
+        return wt.branch
 
     # --- test phase ----------------------------------------------------------------
     async def _phase_test(self, task: dict, wf: Workflow, phase: Phase) -> str | None:
@@ -770,38 +1098,47 @@ class Engine:
     # --- fan-out / compare -------------------------------------------------------------
     async def _phase_fanout(self, task: dict, wf: Workflow, phase: Phase) -> str | None:
         overrides = (task["routing_overrides"] or {}).get(phase.key)
-        count = int(task["metadata"].get("fanout_count", 2))
+        policy = task["metadata"].get("collaboration", "auto")
+        count = len(overrides) if isinstance(overrides, list) and overrides else \
+            collaboration.fanout_count(policy, task["metadata"])
+        strict = policy in ("cross_model", "independent_research", "manual")
         decisions = []
+        used: list[tuple[str, str]] = []
+        providers: list[str] = []
         try:
-            if isinstance(overrides, list) and overrides:
-                for ov in overrides:
-                    decisions.append(self._route(task, phase, override=ov))
-            else:
-                used: list[tuple[str, str]] = []
-                providers: list[str] = []
-                for _ in range(count):
-                    d = self._route(task, phase, avoid=providers, exclude=used)
-                    decisions.append(d)
-                    used.append((d.provider, d.model))
-                    providers.append(d.provider)
+            for i in range(count):
+                d = self._route(task, phase, avoid=providers, exclude=used, fanout_index=i, fanout_used=providers)
+                decisions.append(d)
+                used.append((d.provider, d.model))
+                providers.append(d.provider)
         except RoutingError as e:
-            if not decisions:
-                self._to(task, S.BLOCKED, f"routing failed: {e}", error=str(e)[:2000])
+            if not decisions or strict:
+                self._to(task, S.BLOCKED, f"{phase.key}: collaboration policy '{policy}' cannot be satisfied — {e}"
+                         if strict else f"routing failed: {e}", error=str(e)[:2000])
                 return None
-            self.forge.bus.emit("routing.partial", f"Only {len(decisions)} proposer(s) available: {e}",
+            self.forge.bus.emit("routing.partial", f"Only {len(decisions)} agent(s) available: {e}",
                                 project_id=task["project_id"], task_id=task["id"], level="warn")
         results = await asyncio.gather(*[
             self._agent_run(task, wf, phase, decision=d, emit_suffix=f" #{i + 1}") for i, d in enumerate(decisions)])
         ok = 0
+        kind = SCHEMA_ARTIFACT_KIND.get(phase.schema or "", "proposal")
         for res, run_id, d in results:
             if res is not None and res.ok:
                 ok += 1
                 label = f"{d.provider}/{res.resolved_model or d.model}"
-                self.forge.artifacts.add(task["project_id"], task["id"], "proposal", f"Proposal by {label}",
+                title = f"Proposal by {label}" if kind == "proposal" else f"{phase.key} ({phase.role}) by {label}"
+                self.forge.artifacts.add(task["project_id"], task["id"], kind, title,
                                          res.structured or {"summary": res.text}, run_id=run_id)
-        if ok == 0:
-            first = next((r for r, _, _ in results if r is not None), None)
-            return self._handle_failure(task, phase, first or ExecResult(ok=False, error="no proposer ran"))
+                if phase.report:
+                    self._write_report(task, phase, res.structured or {}, run_id, label)
+        if ok == 0 or (strict and ok < len(results)):
+            first = next((r for r, _, _ in results if r is not None and not r.ok), None)
+            if strict and ok:
+                self._to(task, S.FAILED if first and classify_failure(first.error_kind) == "limit_exhausted" else
+                         S.BLOCKED, f"{phase.key}: only {ok}/{len(results)} independent agents succeeded; policy "
+                         f"'{policy}' requires all of them", error=(first.error if first else "agent failed")[:2000])
+                return None
+            return self._handle_failure(task, phase, first or ExecResult(ok=False, error="no agent ran"))
         if ok < len(results):
             self.forge.bus.emit("fanout.partial", f"{ok}/{len(results)} proposals succeeded",
                                 project_id=task["project_id"], task_id=task["id"], level="warn")
@@ -883,6 +1220,10 @@ class Engine:
                               f"{'Approved' if approve else 'Rejected'}: {a['title'][:150]}",
                               note or a["detail"][:1000], source_task_id=task["id"], importance=0.9)
         kind = a["kind"]
+        if kind == "recovery":
+            if approve:
+                self.recover_to_branch(task["id"], a["payload"]["artifact_id"])
+            return a
         if kind == "external_task":
             if task["state"] == S.AWAITING_APPROVAL.value:
                 if approve:
@@ -971,6 +1312,17 @@ class Engine:
         else:
             bad = [k["id"] for k in kids if k["state"] != S.COMPLETED.value]
             self._to(parent, S.FAILED, f"subtasks not completed: {', '.join(bad)}", disposition="subtasks failed")
+
+
+def classify_failure(error_kind: str | None) -> str:
+    """Retry classification. Deterministic limits are never retried identically."""
+    if error_kind in ("turn_limit", "timeout"):
+        return "limit_exhausted"
+    if error_kind in ("auth", "rate_limit", "model_unavailable"):
+        return "needs_user"
+    if error_kind == "bad_output":
+        return "bad_output"
+    return "transient"
 
 
 _PYTEST = re.compile(r"^(?:=+ )?(\d+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b.*?|no tests ran) in [\d.]+s",

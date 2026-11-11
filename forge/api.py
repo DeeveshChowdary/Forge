@@ -27,6 +27,7 @@ from .coordination.api import build_routers, install_handlers
 from .coordination.bridge import Bridge
 from .db import loads
 from .domain import ROUTING_MODES, InvalidTransition, ProjectConfig
+from .collaboration import PolicyError
 from .engine import submit_task
 from .router import RouteContext, RoutingError
 from .services import Conflict, NotFound
@@ -66,7 +67,9 @@ class TaskCreate(BaseModel):
     approval_policy: str = Field("risky", pattern="^(risky|every_phase|never_merge)$")
     execution_mode: str | None = Field(None, pattern="^(worktree|read_only)$")
     budget: dict[str, Any] = Field(default_factory=dict)
-    decompose: bool = False
+    decompose: bool | str = False          # True = planner subtasks; "sections" = one subtask per objective section
+    collaboration: str | None = Field(None, pattern="^(auto|cross_model|independent_research|implement_review|manual)$")
+    phase_limits: dict[str, dict[str, int]] = Field(default_factory=dict)
     as_milestone: bool = False
     fanout_count: int | None = Field(None, ge=1, le=4)
     mock: dict[str, Any] | None = None
@@ -179,6 +182,10 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
 
     @app.exception_handler(ValueError)
     async def _ve(_, e):
+        return JSONResponse({"detail": str(e)}, status_code=400)
+
+    @app.exception_handler(PolicyError)
+    async def _pol(_, e):
         return JSONResponse({"detail": str(e)}, status_code=400)
 
     @app.exception_handler(RoutingError)
@@ -412,11 +419,32 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
     def list_tasks(project_id: str | None = None, state: list[str] | None = Query(None), limit: int = 200):
         return forge.tasks.list(project_id, state, limit)
 
-    @app.post("/api/tasks")
-    def create_task(body: TaskCreate):
+    def _task_kwargs(body: TaskCreate) -> tuple[dict, dict]:
         meta: dict[str, Any] = {}
         if body.decompose:
-            meta["decompose"] = True
+            meta["decompose"] = body.decompose
+        if body.collaboration:
+            meta["collaboration"] = body.collaboration
+        budget = dict(body.budget)
+        if body.phase_limits:
+            budget["phase_limits"] = body.phase_limits
+        return meta, budget
+
+    @app.post("/api/tasks/preflight")
+    def task_preflight(body: TaskCreate):
+        from . import preflight as pf
+        p = forge.projects.get(body.project_id)
+        wf = wfmod.get(body.workflow or p["config"]["default_workflow"])
+        meta, budget = _task_kwargs(body)
+        policy = meta.get("collaboration") or wf.default_collaboration
+        return {"workflow": wf.key, "collaboration": policy, **pf.run(
+            forge, p["id"], wf, body.objective, policy=policy,
+            mode=body.routing_mode or p["config"]["default_routing_mode"], complexity=body.complexity,
+            overrides=body.routing_overrides, budget={**p["config"]["limits"], **budget}, metadata=meta)}
+
+    @app.post("/api/tasks")
+    def create_task(body: TaskCreate):
+        meta, budget = _task_kwargs(body)
         if body.fanout_count:
             meta["fanout_count"] = body.fanout_count
         if body.mock is not None:
@@ -428,7 +456,7 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
                            complexity=body.complexity, criticality=body.criticality, routing_mode=body.routing_mode,
                            routing_overrides=body.routing_overrides, review_depth=body.review_depth,
                            approval_policy=body.approval_policy, execution_mode=body.execution_mode,
-                           budget=body.budget, metadata=meta, as_milestone=body.as_milestone)
+                           budget=budget, metadata=meta, as_milestone=body.as_milestone)
 
     @app.get("/api/tasks/{tid}")
     def get_task(tid: str):
@@ -447,6 +475,10 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
         t["approvals"] = forge.approvals.list(task_id=tid)
         t["children"] = forge.tasks.list(parent_id=tid)
         t["events"] = forge.bus.recent(task_id=tid, limit=400)
+        t["analysis"] = forge.engine.failure_analysis(t)
+        wf = wfmod.get(t["workflow"])
+        t["phase_limits"] = {ph.key: dict(zip(("max_turns", "max_runtime_s"), forge.engine.phase_limits(t, ph)))
+                             for ph in wf.phases if ph.kind in ("agent", "fanout")}
         return t
 
     @app.get("/api/tasks/{tid}/diff")
@@ -483,8 +515,15 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
         return forge.engine.request_revision(tid, body.get("note", ""))
 
     @app.post("/api/tasks/{tid}/retry")
-    def retry(tid: str):
-        return forge.tasks.retry(tid)
+    def retry(tid: str, body: dict[str, Any] | None = None):
+        b = body or {}
+        return forge.engine.retry_task(tid, phase_max_turns=b.get("phase_max_turns"),
+                                       phase_max_runtime_s=b.get("phase_max_runtime_s"),
+                                       continue_from_checkpoint=bool(b.get("continue_from_checkpoint")))
+
+    @app.post("/api/tasks/{tid}/recover")
+    def recover(tid: str, body: dict[str, str]):
+        return forge.engine.request_recovery(tid, body["artifact_id"])
 
     # ------------------------------------------------------------ approvals
     @app.get("/api/approvals")

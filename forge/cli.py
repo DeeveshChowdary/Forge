@@ -168,6 +168,21 @@ def cmd_plan(a) -> int:
     cfg = f.projects.config(p["id"])
     wf = wfmod.get(a.workflow or cfg.default_workflow)
     ov = _overrides(a.route)
+    if a.collaboration or a.objective:
+        from . import preflight as pf
+        policy = a.collaboration or wf.default_collaboration
+        r = pf.run(f, p["id"], wf, a.objective or "", policy=policy, mode=a.mode, complexity=a.complexity,
+                   overrides=ov, budget=cfg.limits.model_dump())
+        print(f"Plan for {p['name']} — {wf.name} — collaboration {policy}\n")
+        for ph in r["route_plan"]["phases"]:
+            agents = ", ".join(x.get("error") and f"BLOCKED ({x['error'][:80]})" or
+                               f"{x['provider']}/{x['model']} ({x['effort']})" for x in ph["agents"]) or ph["kind"]
+            print(f"  {ph['phase']:22} {ph['role']:15} {agents}")
+        for w in r["warnings"]:
+            print(f"  {C['y']}warning:{C['x']} {w}")
+        for b in r["blockers"]:
+            print(f"  {C['r']}blocker:{C['x']} {b}")
+        return 1 if r["blockers"] else 0
     print(f"Dry-run plan for {p['name']} — workflow {wf.name} (mode {a.mode}); nothing is executed.\n")
     for ph in wf.phases:
         if ph.kind in ("test", "compare"):
@@ -192,7 +207,9 @@ def cmd_plan(a) -> int:
 
 def cmd_run(a) -> int:
     f = _forge()
-    meta = {"decompose": True} if a.decompose else {}
+    meta = {"decompose": "sections" if a.decompose == "sections" else True} if a.decompose else {}
+    if a.collaboration:
+        meta["collaboration"] = a.collaboration
     t = submit_task(f, a.project, title=a.title or a.objective[:80], objective=a.objective, workflow=a.workflow,
                     routing_mode=a.mode, routing_overrides=_overrides(a.route), complexity=a.complexity,
                     review_depth=a.review, approval_policy=a.approval, metadata=meta,
@@ -284,9 +301,11 @@ def cmd_status(a) -> int:
 
 def cmd_control(a) -> int:
     f = _forge()
-    fn = {"pause": f.tasks.request_pause, "resume": f.tasks.resume, "cancel": f.tasks.request_cancel,
-          "retry": f.tasks.retry}[a.cmd]
-    t = fn(a.task)
+    if a.cmd == "retry":
+        t = f.engine.retry_task(a.task, phase_max_turns=getattr(a, "max_turns", None),
+                                continue_from_checkpoint=getattr(a, "continue_from_checkpoint", False))
+    else:
+        t = {"pause": f.tasks.request_pause, "resume": f.tasks.resume, "cancel": f.tasks.request_cancel}[a.cmd](a.task)
     print(f"{t['id']}: {t['state']}" + (" (pause requested)" if t["pause_requested"] else "")
           + (" (cancel requested)" if t["cancel_requested"] else ""))
     return 0
@@ -450,6 +469,9 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--mode", default="balanced", choices=["balanced", "max_quality", "economy", "manual"])
     pp.add_argument("--complexity", default="medium", choices=["low", "medium", "high"])
     pp.add_argument("--route", action="append", help="phase=provider:model[:effort] (repeatable)")
+    pp.add_argument("--collaboration", choices=["auto", "cross_model", "independent_research", "implement_review",
+                                                "manual"])
+    pp.add_argument("--objective", help="objective text for preflight warnings")
     pp.set_defaults(fn=cmd_plan)
 
     r = sub.add_parser("run", help="submit a goal; executes in the foreground if no server engine is running")
@@ -463,7 +485,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--review", default="standard", choices=["none", "standard", "independent"])
     r.add_argument("--approval", default="risky", choices=["risky", "every_phase", "never_merge"])
     r.add_argument("--accept", action="append", help="acceptance criterion (repeatable)")
-    r.add_argument("--decompose", action="store_true", help="let the planner split the goal into dependent subtasks")
+    r.add_argument("--decompose", nargs="?", const="planner", choices=["planner", "sections"],
+                   help="split into dependent subtasks (planner output, or one per '## ' section)")
+    r.add_argument("--collaboration", choices=["auto", "cross_model", "independent_research", "implement_review",
+                                               "manual"])
     r.add_argument("--read-only", action="store_true")
     r.add_argument("--foreground", action="store_true", help="execute here even if a server engine is running")
     r.add_argument("--detach", action="store_true", help="only enqueue")
@@ -478,6 +503,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("pause", "resume", "cancel", "retry"):
         c = sub.add_parser(name, help=f"{name} a task")
         c.add_argument("task")
+        if name == "retry":
+            c.add_argument("--max-turns", type=int, help="new step limit for the failed phase")
+            c.add_argument("--continue", dest="continue_from_checkpoint", action="store_true",
+                           help="continue from the latest checkpoint instead of starting the phase over")
         c.set_defaults(fn=cmd_control)
 
     wk = sub.add_parser("worker", help="run the execution engine in the foreground without the web server")
@@ -523,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         return a.fn(a) or 0
-    except (KeyError, ValueError, PermissionError) as e:
+    except (KeyError, ValueError, PermissionError, __import__("forge.collaboration").collaboration.PolicyError) as e:
         print(f"{C['r']}error:{C['x']} {e}", file=sys.stderr)
         return 2
     except Exception as e:  # noqa: BLE001

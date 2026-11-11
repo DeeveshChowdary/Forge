@@ -53,6 +53,8 @@ class RouteContext:
     independent: bool = False          # hard-exclude avoid_providers when an alternative exists
     escalation: int = 0                # raised after failures (economy escalates instead of retrying the same tier)
     exclude: list[tuple[str, str]] = field(default_factory=list)  # (provider, model) pairs already used (fan-out)
+    require_providers: list[str] = field(default_factory=list)   # hard: collaboration policy
+    forbid_providers: list[str] = field(default_factory=list)    # hard: collaboration policy
 
 
 @dataclass
@@ -168,7 +170,11 @@ class HeuristicPolicy:
             tier = m["profile"].get("tier", "standard")
             c = Candidate(p, mid, 0.0, {}, tier)
             st = reg.status(p)
-            if (p, mid) in ctx.exclude:
+            if ctx.require_providers and p not in ctx.require_providers:
+                c.excluded = f"collaboration policy requires {ctx.require_providers}"
+            elif p in ctx.forbid_providers:
+                c.excluded = "collaboration policy forbids this provider for this phase"
+            elif (p, mid) in ctx.exclude:
                 c.excluded = "already used in this fan-out"
             elif not st.get("installed"):
                 c.excluded = "provider not installed"
@@ -220,6 +226,9 @@ class HeuristicPolicy:
             else:
                 reasons.append("Independent review requested but no other provider is available; "
                                "using same provider (flagged)")
+        if not viable and (ctx.require_providers or ctx.forbid_providers):
+            raise RoutingError("collaboration policy cannot be satisfied: " + "; ".join(
+                f"{c.provider}/{c.model}: {c.excluded}" for c in cands if c.excluded)[:1500])
         if not viable:
             raise RoutingError("no available model: " + "; ".join(
                 f"{c.provider}/{c.model}: {c.excluded}" for c in cands) if cands else "no models registered")
@@ -247,6 +256,11 @@ class HeuristicPolicy:
         reg = self.forge.registry
         o = ctx.override or {}
         p, mid = o["provider"], o["model"]
+        if ctx.require_providers and p not in ctx.require_providers:
+            raise RoutingError(f"route {p}/{mid} violates collaboration policy: phase requires "
+                               f"{ctx.require_providers}")
+        if p in ctx.forbid_providers:
+            raise RoutingError(f"route {p}/{mid} violates collaboration policy: {p} is not allowed for this phase")
         try:
             m = reg.model(p, mid)
         except KeyError:

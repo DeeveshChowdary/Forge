@@ -21,6 +21,10 @@ class Phase:
     schema: str | None = None   # key into schemas.BY_NAME
     writes: bool = False        # needs a writable worktree
     instruction: str = ""
+    max_turns: int | None = None        # per-phase default; task budget.phase_limits overrides
+    max_runtime_s: int | None = None
+    report: bool = False        # Forge writes the structured output to the task's report folder and commits it
+    pairing: str | None = None  # "cross": each fan-out agent reviews another provider's earlier output
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,8 @@ class Workflow:
     category: str = "feature"
     read_only_ok: bool = False
     tags: tuple[str, ...] = field(default_factory=tuple)
+    needs_worktree: bool = False        # Forge writes reports even though agents never write
+    default_collaboration: str = "auto"
 
     def phase(self, key: str) -> Phase:
         for p in self.phases:
@@ -100,6 +106,46 @@ WORKFLOWS: dict[str, Workflow] = {w.key: w for w in [
         category="research", tags=("research",),
     ),
     Workflow(
+        "literature_review", "Literature Review → Independent Analysis → Novelty Assessment → Cross-Review → Decision",
+        "Source-grounded literature research. No executable experiment. Claude and Codex investigate "
+        "independently, cross-review each other against primary sources, and the workflow ends in a justified "
+        "GO / PIVOT / REJECT / INCONCLUSIVE decision. Agents only read; Forge writes every report into the "
+        "task's isolated worktree and commits it as a checkpoint.",
+        (
+            Phase("literature_review", S.PLANNING, "librarian", schema="research_report", report=True,
+                  max_turns=80, max_runtime_s=1800,
+                  instruction="Read the existing research files named in the objective (docs, reviews, matrices, "
+                              "annotations, notes, proposals). Build a source-grounded inventory of what is known: "
+                              "every claim must cite a repository-relative file path and a locator (section, "
+                              "heading, page or line range). Mark each claim as verified_in_source, "
+                              "source_reported, interpretation or unknown. Do not invent citations. Do not run "
+                              "experiments, install anything, or check tools/environments."),
+            Phase("independent_analysis", S.EXECUTING, "investigator", kind="fanout", schema="research_report",
+                  report=True, max_turns=100, max_runtime_s=2400,
+                  instruction="Investigate the research question independently, using the literature inventory "
+                              "and the primary files it cites. Another model is investigating the same question "
+                              "in parallel; do not try to coordinate. Every claim needs a source path and locator "
+                              "and an honest evidence_type. Say 'unknown' instead of guessing."),
+            Phase("novelty_assessment", S.REVIEWING, "assessor", schema="novelty", report=True,
+                  max_turns=80, max_runtime_s=1800,
+                  instruction="Using both independent analyses and the primary sources they cite, assess each "
+                              "candidate contribution against the closest prior art. A finite seed review cannot "
+                              "establish novelty: use 'unknown' when coverage is insufficient."),
+            Phase("cross_review", S.REVIEWING, "cross_reviewer", kind="fanout", schema="cross_review",
+                  report=True, pairing="cross", max_turns=80, max_runtime_s=1800,
+                  instruction="Review the OTHER model's independent analysis (in the handoff). For every "
+                              "disagreement with your own analysis, open the primary source and record what it "
+                              "actually says. List claims that the cited sources do not support."),
+            Phase("decision", S.REVIEWING, "decider", schema="decision", report=True,
+                  max_turns=60, max_runtime_s=1500,
+                  instruction="Decide GO, PIVOT, REJECT or INCONCLUSIVE for the proposed research direction. "
+                              "Justify the decision only with cited evidence from the reports and primary "
+                              "sources; record how disagreements were resolved and what remains open."),
+        ),
+        category="research", tags=("research", "literature"), needs_worktree=True,
+        default_collaboration="independent_research",
+    ),
+    Workflow(
         "design_build_validate", "Design → Build → Validate → Deliver",
         "Design first, build, validate with tests and review, then deliver via an approved merge.",
         (
@@ -145,5 +191,7 @@ def get(key: str) -> Workflow:
 def describe() -> list[dict]:
     return [{"key": w.key, "name": w.name, "description": w.description, "category": w.category,
              "read_only_ok": w.read_only_ok, "has_review_loop": bool(w.fix_phase),
-             "phases": [{"key": p.key, "state": p.state.value, "role": p.role, "kind": p.kind, "writes": p.writes}
+             "default_collaboration": w.default_collaboration, "tags": list(w.tags),
+             "phases": [{"key": p.key, "state": p.state.value, "role": p.role, "kind": p.kind, "writes": p.writes,
+                         "max_turns": p.max_turns, "max_runtime_s": p.max_runtime_s, "report": p.report}
                         for p in w.phases]} for w in WORKFLOWS.values()]
