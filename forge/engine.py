@@ -469,13 +469,13 @@ class Engine:
             latest[a["kind"]] = a
         want: list[str]
         if phase.role in ("implementer", "builder", "experimenter"):
-            want = ["plan", "report"]
+            want = ["plan", "report", "external_feedback"]
         elif phase.role == "fixer":
-            want = ["plan", "review", "test_report", "handoff", "revision_request"]
+            want = ["plan", "review", "test_report", "handoff", "revision_request", "external_feedback"]
         elif phase.role == "reviewer":
-            want = ["plan", "handoff", "test_report"]
+            want = ["plan", "handoff", "test_report", "external_feedback"]
         elif phase.role in ("analyst", "researcher"):
-            want = ["report", "handoff", "test_report"]
+            want = ["report", "handoff", "test_report", "external_feedback"]
         else:
             want = []
         out = [latest[k] for k in want if k in latest]
@@ -535,7 +535,7 @@ class Engine:
         prompt = prompts.build(phase, task, instructions=self.forge.projects.trusted_instructions(task["project_id"]),
                                memory=memory, handoffs=self._handoffs(task, phase), read_only=read_only,
                                test_command=cfg.test_command.replace("{python}", sys.executable),
-                               schema=schema, extra=extra)
+                               schema=schema, extra=extra + prompts.provenance(task))
         remaining = int(limits.get("max_task_runtime_s", 7200)) - int(now() - (task["started_at"] or now()))
         timeout = max(1, min(int(limits.get("max_runtime_s", 1800)), remaining))
         attempt = int(task["attempts"]) + 1
@@ -883,6 +883,14 @@ class Engine:
                               f"{'Approved' if approve else 'Rejected'}: {a['title'][:150]}",
                               note or a["detail"][:1000], source_task_id=task["id"], importance=0.9)
         kind = a["kind"]
+        if kind == "external_task":
+            if task["state"] == S.AWAITING_APPROVAL.value:
+                if approve:
+                    self._to(task, S.READY, "external task authorized by user")
+                else:
+                    self._to(task, S.CANCELLED, "external task rejected by user",
+                             disposition="rejected by user (external request)")
+            return a
         if task["state"] != S.AWAITING_APPROVAL.value and kind not in ("spending",):
             return a
         if kind == "merge":

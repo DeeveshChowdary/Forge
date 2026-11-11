@@ -29,7 +29,8 @@ ACTIVE = {TaskState.PLANNING, TaskState.EXECUTING, TaskState.TESTING, TaskState.
 S = TaskState
 # Allowed transitions. Anything not listed is rejected by TaskService.transition.
 TRANSITIONS: dict[TaskState, set[TaskState]] = {
-    S.CREATED: {S.PLANNING, S.READY, S.BLOCKED, S.CANCELLED, S.PAUSED},
+    # CREATED -> AWAITING_APPROVAL: externally submitted tasks wait for the user's authorization.
+    S.CREATED: {S.PLANNING, S.READY, S.BLOCKED, S.CANCELLED, S.PAUSED, S.AWAITING_APPROVAL},
     # PLANNING may loop to READY for the next phase; it is also an active phase.
     S.PLANNING: {S.READY, S.EXECUTING, S.TESTING, S.REVIEWING, S.FAILED, S.BLOCKED, S.PAUSED, S.CANCELLED,
                  S.AWAITING_APPROVAL, S.COMPLETED},

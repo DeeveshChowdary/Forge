@@ -23,6 +23,8 @@ from . import __version__, gitops, integrations
 from . import workflows as wfmod
 from .app import Forge
 from .config import WEB_DIST
+from .coordination.api import build_routers, install_handlers
+from .coordination.bridge import Bridge
 from .db import loads
 from .domain import ROUTING_MODES, InvalidTransition, ProjectConfig
 from .engine import submit_task
@@ -116,9 +118,12 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = None
+        bridge_task = asyncio.create_task(bridge.run_forever())  # no-op until enabled in settings
         if run_engine:
             task = asyncio.create_task(forge.engine.run_forever())
         yield
+        bridge.stop()
+        bridge_task.cancel()
         if task:
             forge.engine.stop()
             try:
@@ -126,14 +131,23 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
             except asyncio.TimeoutError:
                 task.cancel()
 
+    bridge = Bridge(forge)
     app = FastAPI(title="Forge", version=__version__, lifespan=lifespan)
     app.state.forge = forge
+    app.state.bridge = bridge
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
         host = (request.headers.get("host") or "").rsplit(":", 1)[0]
         if host not in ALLOWED_HOSTS:
             return JSONResponse({"detail": "forbidden host"}, status_code=403)
+        origin = request.headers.get("origin")
+        if request.url.path.startswith("/api/v1/"):
+            # Token-authenticated API: bearer tokens are never sent automatically by browsers, so the
+            # X-Forge-Client header is not required; browser-originated cross-site calls are still refused.
+            if origin and origin.split("://", 1)[-1].rsplit(":", 1)[0] not in ALLOWED_HOSTS:
+                return JSONResponse({"detail": "cross-origin request rejected"}, status_code=403)
+            return await call_next(request)
         if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/"):
             if request.headers.get("x-forge-client") is None:
                 return JSONResponse({"detail": "missing X-Forge-Client header"}, status_code=403)
@@ -141,6 +155,11 @@ def create_app(forge: Forge | None = None, *, run_engine: bool = True) -> FastAP
             if origin and origin.split("://", 1)[-1].rsplit(":", 1)[0] not in ALLOWED_HOSTS:
                 return JSONResponse({"detail": "cross-origin request rejected"}, status_code=403)
         return await call_next(request)
+
+    v1, coord_ui = build_routers(forge, bridge)
+    app.include_router(v1)
+    app.include_router(coord_ui)
+    install_handlers(app)
 
     @app.exception_handler(NotFound)
     async def _nf(_, e):

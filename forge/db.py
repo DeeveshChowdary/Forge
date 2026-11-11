@@ -250,6 +250,74 @@ CREATE TABLE IF NOT EXISTS milestones (
     created_at REAL NOT NULL
 );
 
+-- Coordination layer (M9). Additive only: older databases gain these tables on open.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,    -- sha256 of the token; the token itself is never stored
+    prefix TEXT NOT NULL,               -- first characters, for identification in the UI
+    scopes TEXT NOT NULL DEFAULT '["read"]',
+    projects TEXT NOT NULL DEFAULT '[]', -- project ids, or ["*"]
+    created_at REAL NOT NULL,
+    last_used_at REAL,
+    revoked_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS gh_links (
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
+    issue_url TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    project_id TEXT,
+    task_id TEXT,
+    status TEXT NOT NULL,               -- discovered | validated | awaiting_authorization | queued | running | completed | rejected | failed
+    reason TEXT NOT NULL DEFAULT '',
+    request_hash TEXT NOT NULL DEFAULT '',
+    status_comment_id INTEGER,
+    last_published TEXT NOT NULL DEFAULT '',
+    last_published_at REAL,
+    comments_since TEXT,
+    error TEXT,
+    retries INTEGER NOT NULL DEFAULT 0,
+    next_retry_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE (repo, issue_number)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gh_links_task ON gh_links(task_id) WHERE task_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS gh_comments (
+    repo TEXT NOT NULL,
+    comment_id INTEGER NOT NULL,
+    issue_number INTEGER NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL,
+    processed_at REAL NOT NULL,
+    PRIMARY KEY (repo, comment_id)
+);
+
+CREATE TABLE IF NOT EXISTS gh_outbox (
+    id TEXT PRIMARY KEY,
+    link_id TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL UNIQUE,    -- one message per (link, event) even across restarts
+    body TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending | sent | failed
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    comment_id INTEGER,
+    created_at REAL NOT NULL,
+    sent_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS worker_locks (
+    name TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    heartbeat REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS engine_lock (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     owner TEXT NOT NULL,
