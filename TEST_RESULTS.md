@@ -126,3 +126,54 @@ differences, agent control center (real provider details and model statuses), ta
 light/dark themes, mobile width (no horizontal page scroll). Bugs found and fixed during
 this pass: pytest summary parsing, project card overflow on mobile, compare phase shown as
 "skipped", the first comparison never pairing steps.
+
+## M9 — external coordination (2026-11-10/11, branch `dev/m9-external-coordination`)
+
+All runs used isolated temporary databases; the live `~/.forge` instance was not modified.
+
+| Suite | Result |
+|---|---|
+| Backend (`pytest -q`) | **86 passed**, 1 skipped (was 59; +27 coordination tests) |
+| Coordination tests (`tests/test_coordination.py`) | **27 passed** |
+| Frontend components (Vitest) | 11 passed |
+| Type check | clean |
+| End-to-end (Playwright, Chrome) | **4 passed** (new: Coordination page — toggle bridge, create token in UI, use it on `/api/v1`, no local paths in response) |
+
+Coordination test coverage: GitHub token resolution and auth/permission errors
+(401/403, token never in repr); public-repo refusal; missing token → `auth` error state;
+issue → task end-to-end with mock execution, in-place status comment, merge approval
+notice, `/forge revise` → fix phase, single final summary, no local paths; unauthorized
+authors (not allowlisted, or allowlisted name without collaborator association) silently
+rejected; label required and PRs ignored; invalid request reply and correction by edit;
+project scope enforcement; duplicate processing (repeated syncs, cursor reset, comment
+re-listing) → one task, one feedback; concurrent bridge workers (threads) → one task;
+authorization required by default, rejection → `rejected`; untrusted comments
+(strangers, prose, `/forge approve`) never act; rate limiting (429 backoff, client reserve,
+ETag 304), network failure retries and exponential backoff; outbox delivery after
+failures and after a simulated restart (exactly one comment); disabled bridge makes no
+calls; an unrelated running task is untouched by a sync; coordination API auth
+(401/invalid/revoked/cross-origin), scopes (403), project authorization (404 for other
+projects), schema strictness (422), pagination and filtering, sanitized events/artifacts/
+agents, feedback (comment/revision/409 when not applicable); API rate limiter; UI
+endpoints still need the local header and never return token hashes; additive migration
+keeps existing rows; MCP initialize/tools/list/call with scope enforcement and invalid
+token refusal.
+
+**Migration check on real data:** a read-only `.backup` copy of the live database (5 tasks,
+18 runs, 424 events) was opened with the new code: the 5 new tables were added, all counts
+and the research task row were byte-for-byte unchanged, the coordination API read the
+task correctly, and the bridge stayed disabled. The live database has no M9 tables.
+
+**Demonstration** (`scripts/demo_bridge.py`, disposable FORGE_HOME, simulated GitHub over
+HTTP, mock agents): issue by authorized user discovered and validated; an issue by
+`stranger` rejected with no reply; task awaited authorization, was approved in Forge,
+executed (plan → implement → test → review), status published; `/forge revise` from the
+owner triggered the fix phase while the same command from `stranger` was ignored; merge
+approved in Forge; final summary posted once (23 API calls). Result: **PASS**.
+
+**Not verified live:** no GitHub credentials are available to Forge on this machine (`gh`
+not installed, `FORGE_GITHUB_TOKEN` unset, no keychain item), so real GitHub reads/writes
+have not been exercised. `forge bridge check` reports this. Live write integration
+remains **unverified** until a token is configured and `forge bridge check` + one test
+issue succeed.
+

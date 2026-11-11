@@ -65,3 +65,34 @@ Real records live in `~/.forge/forge.db` (projects `handoff-demo`, `R4`); view t
    Proposals tab) and decide whether to adopt one; Forge did not change R4.
 3. Optional hardening: API token for the local server; Codex MCP pass-through; GitHub PR
    approval flow.
+
+## M9 — external coordination (branch `dev/m9-external-coordination`, not merged)
+
+Developed in the worktree `~/research/forge-m9` so the running instance (started from
+the main checkout) was never touched. See docs/EXTERNAL_COORDINATION.md,
+docs/GITHUB_BRIDGE.md, docs/REMOTE_ACCESS.md.
+
+**Observed during M9 (not caused by it):** the Independent Research task
+`t_fa827e885e2d` (R4 M1 deep prior-art review) FAILED at 22:56 with "turn limit 40
+exceeded" in the `experiment` phase on both attempts; partial edits were saved as a diff
+artifact. Raise the project's `max_turns` (e.g. 150) and retry.
+
+### Safe activation (after no task is executing)
+
+1. Confirm nothing is running: `forge status` shows no PLANNING/EXECUTING/TESTING/
+   REVIEWING tasks (or wait for them to finish).
+2. Back up the database: `sqlite3 ~/.forge/forge.db ".backup ~/.forge/forge-pre-m9.db"`.
+3. Stop the server (Ctrl-C in its terminal; running tasks would be requeued, not lost).
+4. Merge the branch: `cd ~/research/forge && git merge --ff-only dev/m9-external-coordination`
+   (or review the diff first), then `pnpm --dir web build`.
+5. Start from your own terminal: `~/research/forge/.venv/bin/forge serve`. The new tables
+   are created on open; the bridge stays **disabled**.
+6. Configure GitHub access (fine-grained token, Issues read/write on the research repo,
+   via `gh auth login` or the keychain) and run `forge bridge check`.
+7. Create the `forge-task` label, then on the Coordination page review authorized authors
+   and projects and click **Enable bridge**.
+8. Live verification: open one test issue (your approval needed to post in the research
+   repo) and confirm discovery, authorization, status comment and final summary.
+9. Rollback: stop the server, `git checkout` the previous commit; the extra tables are
+   ignored by the old code (or restore the backup).
+

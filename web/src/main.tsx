@@ -12,6 +12,7 @@ import Live from "./pages/Live";
 import Approvals from "./pages/Approvals";
 import Agents from "./pages/Agents";
 import Settings from "./pages/Settings";
+import Coordination from "./pages/Coordination";
 
 function NotFound() {
   return <div className="p-8 text-center muted">Page not found.</div>;
@@ -32,6 +33,7 @@ createRoot(document.getElementById("root")!).render(
           <Route path="approvals" element={<Approvals />} />
           <Route path="agents" element={<Agents />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="coordination" element={<Coordination />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

@@ -165,3 +165,28 @@ writes plans, review problems, failures, test results, milestones and approval d
 * **Workflow**: add a `Workflow` to `WORKFLOWS` (phases, review phase, fix phase).
 * **Integration**: subclass `Integration`, add to `integrations.REGISTRY`.
 * **Router**: implement `RoutingPolicy` and pass it to `Router(forge, policy)`.
+
+## External coordination layer (M9)
+
+```
+ GitHub issues/comments ──poll── coordination/bridge.py ─┐
+ HTTP /api/v1/coordination (bearer) ── coordination/api.py ├─► coordination/service.py ─► engine / services / bus
+ stdio MCP ── coordination/mcp.py ────────────────────────┘        (scopes, project limits, sanitize.py)
+```
+
+* `service.py` — principal-scoped facade: reads (projects, tasks, events, artifacts,
+  agents) built only from persisted rows; writes call `submit_task` and
+  `Engine.request_revision`. External tasks are created `CREATED → AWAITING_APPROVAL`
+  with an `external_task` approval unless authorization is disabled; approving moves
+  them to `READY`, rejecting cancels them. Agents get external feedback as an
+  `external_feedback` handoff artifact and a provenance note in their prompt.
+* `tokens.py` — SHA-256-hashed bearer tokens with scopes `read`, `tasks:write`,
+  `feedback:write` and a project list; in-process token-bucket rate limit.
+* `bridge.py` — polling worker (lock in `worker_locks`), allowlisted repos/authors,
+  `forge-task` JSON schema, idempotent `gh_links` / `gh_comments`, outbox `gh_outbox`
+  with unique keys, status comment edited in place, exponential backoff.
+* `github.py` — REST client (httpx), ETag caching, rate-limit tracking, typed errors;
+  token from env, `gh auth token`, or keychain — never stored.
+* Schema changes are additive (`CREATE TABLE IF NOT EXISTS`); the only new task
+  transition is `CREATED → AWAITING_APPROVAL`.
+* The bridge worker starts with `forge serve` and does nothing until enabled.

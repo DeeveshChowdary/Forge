@@ -61,3 +61,22 @@ test("rejects cross-site writes", async ({ request }) => {
   const r = await request.post("/api/projects", { data: { mode: "create", name: "x" } });
   expect(r.status()).toBe(403);
 });
+
+test("coordination page: toggle bridge, create a scoped token, and use it against the v1 API", async ({ page, request }) => {
+  await page.goto("/coordination");
+  await expect(page.getByRole("heading", { name: "Coordination", exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByText("DeeveshChowdary/independent-research").first()).toBeVisible();
+  await page.getByRole("button", { name: "Enable bridge" }).click();
+  await expect(page.getByRole("button", { name: "Disable bridge" })).toBeVisible();
+  await page.getByRole("button", { name: "Disable bridge" }).click();
+  await expect(page.getByRole("button", { name: "Enable bridge" })).toBeVisible();
+  await page.locator('input[name="name"]').fill("e2e-assistant");
+  await page.locator('select[name="projects"]').selectOption({ index: 0 });
+  await page.getByRole("button", { name: "Create token" }).click();
+  const token = (await page.locator("code", { hasText: "fgt_" }).textContent())!.trim();
+  expect(token.startsWith("fgt_")).toBe(true);
+  expect((await request.get("/api/v1/coordination/projects")).status()).toBe(401);
+  const r = await request.get("/api/v1/coordination/projects", { headers: { Authorization: `Bearer ${token}` } });
+  expect(r.status()).toBe(200);
+  expect(JSON.stringify(await r.json())).not.toContain("/Users/");
+});

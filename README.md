@@ -89,6 +89,21 @@ forge run my-app "Add rate limiting to the /login endpoint with tests" \
   --route plan=claude_code:claude-sonnet-5-5 --route implement=codex:gpt-6.1-sol:medium
 ```
 
+## External coordination (M9)
+
+External assistants such as ChatGPT can submit tasks, monitor them and send feedback
+**through GitHub issues** in an allowlisted private repository, without anyone relaying
+messages between agents. Local tools can use the token-scoped
+`/api/v1/coordination/*` API or the stdio MCP server (`forge mcp`). Configure everything
+on the **Coordination** page. See [docs/EXTERNAL_COORDINATION.md](docs/EXTERNAL_COORDINATION.md),
+[docs/GITHUB_BRIDGE.md](docs/GITHUB_BRIDGE.md) and [docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md).
+
+| Command | Purpose |
+|---|---|
+| `forge bridge status\|check\|enable\|disable\|sync\|run` | GitHub bridge |
+| `forge token create NAME --project P [--scope tasks:write] [--scope feedback:write]` / `list` / `revoke ID` | coordination API tokens |
+| `forge mcp` | stdio MCP server (needs `FORGE_COORDINATION_TOKEN`) |
+
 ## Verified on this machine (2026-11-10)
 
 * Claude Code CLI 2.1.72 (Claude Pro, subscription) — verified: `sonnet`→`claude-sonnet-4-6`,

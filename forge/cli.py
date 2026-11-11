@@ -340,6 +340,80 @@ def cmd_decide(a) -> int:
     return 0
 
 
+def cmd_bridge(a) -> int:
+    from .coordination.bridge import Bridge
+    from .coordination.github import GitHubClient, GitHubError, resolve_token
+    f = _forge()
+    b = Bridge(f)
+    if a.bcmd == "status":
+        print(json.dumps(b.status(), indent=1, default=str))
+    elif a.bcmd in ("enable", "disable"):
+        cfg = b.save_config({"enabled": a.bcmd == "enable"})
+        print(f"bridge {'enabled' if cfg.enabled else 'disabled'}; repositories: {', '.join(cfg.repos)}")
+    elif a.bcmd == "check":
+        cfg = b.config()
+        token, src = resolve_token(cfg.token_source)
+        print(f"token source: {src}")
+        if not token:
+            return 1
+        c = GitHubClient(token=token)
+        try:
+            print(f"authenticated as: {c.viewer()['login']}")
+            for repo in cfg.repos:
+                info = c.repo(repo)
+                print(f"{repo}: private={info['private']} permissions={info['permissions']}")
+                c.list_issues(repo, label=cfg.repos[repo].label)
+                print(f"  can list issues: yes (rate remaining {c.rate.remaining})")
+        except GitHubError as e:
+            print(f"{C['r']}GitHub check failed:{C['x']} {e}")
+            return 1
+        print("note: comment-write permission is only proven by the first published comment")
+    elif a.bcmd == "sync":
+        print(json.dumps(b.sync_once(), indent=1, default=str))
+    elif a.bcmd == "run":
+        print("bridge worker running; Ctrl-C to stop")
+        try:
+            asyncio.run(b.run_forever())
+        except KeyboardInterrupt:
+            pass
+    return 0
+
+
+def cmd_token(a) -> int:
+    from .coordination.tokens import TokenService
+    f = _forge()
+    ts = TokenService(f.db)
+    if a.tcmd == "create":
+        projects = ["*"] if a.project == ["*"] else [f.projects.get(x)["id"] for x in a.project]
+        t = ts.create(a.name, a.scope, projects)
+        print(f"token id {t['id']} scopes={t['scopes']} projects={t['projects']}")
+        print(f"token (shown once, store it securely): {t['token']}")
+    elif a.tcmd == "list":
+        for t in ts.list():
+            print(f"{t['id']}  {t['name']:20} {t['prefix']}…  scopes={t['scopes']} projects={t['projects']}"
+                  f"{'  REVOKED' if t['revoked_at'] else ''}")
+    elif a.tcmd == "revoke":
+        ts.revoke(a.id)
+        print(f"revoked {a.id}")
+    return 0
+
+
+def cmd_mcp(a) -> int:
+    from .coordination.mcp import MCPServer
+    token = os.environ.get("FORGE_COORDINATION_TOKEN")
+    if not token:
+        print("set FORGE_COORDINATION_TOKEN (create one with `forge token create`)", file=sys.stderr)
+        return 2
+    from .coordination.tokens import AuthError
+    try:
+        server = MCPServer(_forge(), token)
+    except AuthError as e:
+        print(f"forge mcp: {e}", file=sys.stderr)
+        return 2
+    server.serve_stdio()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="forge", description="Forge: local-first multi-model AI engineering harness")
     ap.add_argument("--version", action="version", version=f"forge {__version__}")
@@ -427,6 +501,24 @@ def main(argv: list[str] | None = None) -> int:
         c.add_argument("approval")
         c.add_argument("--note")
         c.set_defaults(fn=cmd_decide)
+
+    br = sub.add_parser("bridge", help="GitHub coordination bridge")
+    br.add_argument("bcmd", choices=["status", "check", "enable", "disable", "sync", "run"])
+    br.set_defaults(fn=cmd_bridge)
+
+    tk = sub.add_parser("token", help="coordination API tokens for external assistants")
+    tsub = tk.add_subparsers(dest="tcmd", required=True)
+    tc = tsub.add_parser("create")
+    tc.add_argument("name")
+    tc.add_argument("--scope", action="append", choices=["read", "tasks:write", "feedback:write"], default=None)
+    tc.add_argument("--project", action="append", required=True, help="project name/id (repeatable) or '*'")
+    tsub.add_parser("list")
+    tr = tsub.add_parser("revoke")
+    tr.add_argument("id")
+    tk.set_defaults(fn=cmd_token)
+
+    mc = sub.add_parser("mcp", help="stdio MCP server for local MCP clients (needs FORGE_COORDINATION_TOKEN)")
+    mc.set_defaults(fn=cmd_mcp)
 
     a = ap.parse_args(argv)
     try:

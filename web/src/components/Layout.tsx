@@ -9,6 +9,7 @@ const NAV = [
   { to: "/live", label: "Live execution", icon: "◉" },
   { to: "/approvals", label: "Approvals", icon: "✓" },
   { to: "/agents", label: "Agent control", icon: "⚙" },
+  { to: "/coordination", label: "Coordination", icon: "⇄" },
   { to: "/settings", label: "Settings", icon: "☰" },
 ];
 

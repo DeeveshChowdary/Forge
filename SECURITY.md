@@ -83,3 +83,27 @@ against.
 ## Reporting
 
 This is a personal tool; report issues to the repository owner.
+
+## External coordination (M9)
+
+* **GitHub bridge:** only allowlisted private repositories (initially
+  `DeeveshChowdary/independent-research`; public repos are refused), only allowlisted
+  authors who are also owner/member/collaborator, only issues with the `forge-task`
+  label and one schema-validated JSON block (unknown fields rejected). Comments act only
+  through `/forge revise|feedback|status` from authorized users; everything else is
+  ignored and never reaches prompts. Nothing from GitHub is executed as a command.
+* **Approvals stay human:** merges, unresolved reviews, spending and phase approvals can
+  only be decided in Forge. External tasks wait for authorization by default.
+* **Prompt injection:** inbound text is stripped of HTML comments and invisible
+  characters and length-capped; external tasks carry a provenance section instructing
+  agents to treat quoted/retrieved content as data; existing read-only sandboxes,
+  worktree isolation and tool allowlists still apply.
+* **Outbound sanitization:** token/secret patterns, environment lines, e-mail addresses,
+  local paths and @mentions are removed or neutralized in every GitHub comment, API and
+  MCP response. No prompts, raw logs, credentials, file browsing or Zotero data.
+* **Coordination API:** bearer tokens (hashed at rest, revocable, project-scoped), still
+  localhost-only with the host/origin guards; read-only by default.
+* **GitHub token:** read from env/`gh`/keychain at use; never stored, logged or returned.
+* **Limits:** the bridge cannot change repository visibility, push, merge or deploy.
+  Remote/public exposure (tunnels, remote MCP) is not implemented and needs explicit
+  approval (see docs/REMOTE_ACCESS.md).
