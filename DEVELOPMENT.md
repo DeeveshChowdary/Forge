@@ -82,3 +82,10 @@ With the mock provider enabled (Settings → Providers), tasks accept a `mock` o
  "reviews": ["request_changes", "approve"], "fail": {"implementer": 1},
  "sleep_s": 2, "subtasks": [{"title": "A", "objective": "…", "depends_on": []}]}
 ```
+
+## Claude Code settings
+
+`.claude/settings.json` holds the project's Claude Code settings (commit and PR message
+defaults). Forge passes equivalent `--settings` to the Claude agents it launches
+(`GlobalSettings.disable_ai_attribution`), and the merge approval lists any agent-made
+commits whose messages contain tool-generated trailers.

@@ -161,6 +161,24 @@ def log(path: Path | str, n: int = 30, ref: str = "HEAD") -> list[dict]:
     return rows
 
 
+AI_TRAILER = re.compile(r"(?im)^(co-authored-by:.*(claude|anthropic|openai|codex|chatgpt|gpt-|copilot|gemini|noreply@anthropic\.com).*"
+                        r"|.*generated with \[?(claude code|codex)\]?.*)$")
+
+
+def ai_attribution_in_range(path: Path | str, base: str, ref: str = "HEAD") -> list[dict]:
+    """Commits in base..ref whose messages carry AI co-author trailers or 'Generated with' lines."""
+    out = []
+    raw = git(path, "log", "--format=%H%x1f%B%x1e", f"{base}..{ref}", check=False)
+    for rec in raw.split("\x1e"):
+        if "\x1f" not in rec:
+            continue
+        sha, msg = rec.strip("\n").split("\x1f", 1)
+        hits = [m.group(0).strip() for m in AI_TRAILER.finditer(msg)]
+        if hits:
+            out.append({"sha": sha, "lines": hits})
+    return out
+
+
 def merge_branch(repo: Path, branch: str, message: str) -> str:
     """Merge an agent branch into the user's checked-out branch. Refuses on a dirty tree."""
     dirty = dirty_files(repo)

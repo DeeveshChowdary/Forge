@@ -103,7 +103,7 @@ without counting an attempt.
 | Effort | `--effort low|medium|high|max` | `-c model_reasoning_effort=…` (per-model levels) |
 | Read-only | `--tools Read,Grep,Glob` + disallow write/shell | `-s read-only` (OS sandbox) |
 | Write | `acceptEdits`, Edit/Write + scoped `Bash(prefix:*)` | `-s workspace-write` in the worktree |
-| Isolation | `--setting-sources user`, `--strict-mcp-config` | `--ignore-user-config` (auth still from CODEX_HOME) |
+| Isolation | `--setting-sources user`, `--strict-mcp-config`, `--settings` with empty `attribution` | `--ignore-user-config` (auth still from CODEX_HOME) |
 | Resume | `--resume <session>` | `exec resume <thread> -` |
 | Usage | tokens + `total_cost_usd` (subscription estimate) | tokens only |
 

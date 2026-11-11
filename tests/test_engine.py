@@ -387,3 +387,33 @@ def test_compare_proposals_pairs_steps_and_real_evidence(tmp_path):
     assert c["only_b_steps"] == ["Build a prototype"]
     assert c["shared_evidence"] == ["docs/PLAN.md"]
     assert c["only_a_evidence"] == [] and c["only_b_evidence"] == []  # non-existent / prose paths ignored
+
+
+async def test_forge_generated_commits_have_no_ai_trailers(mock_app, py_repo):
+    from forge import gitops
+    app = mock_app
+    p = project(app, py_repo)
+    t = submit_task(app, p["id"], title="mul", objective="Add mul", metadata={"mock": {"files": MUL_IMPL}})
+    await drive(app, [t["id"]])
+    t = app.tasks.get(t["id"])
+    ap = app.approvals.list(task_id=t["id"], status="pending")[0]
+    assert "Warning" not in ap["detail"]
+    app.engine.apply_approval(ap["id"], True)
+    msgs = gitops.git(py_repo, "log", "--format=%B", f"{t['base_commit']}..HEAD")
+    assert "forge(implement)" in msgs and "Merge forge/" in msgs
+    assert "co-authored-by" not in msgs.lower() and "generated with" not in msgs.lower()
+
+
+def test_ai_attribution_detection(tmp_path):
+    from forge import gitops
+    repo = make_repo(tmp_path / "attr")
+    base = gitops.head_commit(repo)
+    (repo / "a.txt").write_text("a")
+    gitops.git(repo, "add", "-A")
+    gitops.git(repo, "commit", "-q", "-m", "agent commit\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+               identity=True)
+    (repo / "b.txt").write_text("b")
+    gitops.git(repo, "add", "-A")
+    gitops.git(repo, "commit", "-q", "-m", "human pair\n\nCo-authored-by: Jane Doe <jane@example.com>", identity=True)
+    hits = gitops.ai_attribution_in_range(repo, base)
+    assert len(hits) == 1 and "Claude" in hits[0]["lines"][0]  # human co-author is not flagged

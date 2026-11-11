@@ -833,6 +833,13 @@ class Engine:
             self._complete(task, "completed (no code changes)" if task["execution_mode"] != "read_only"
                            else "completed (read-only)")
             return
+        flagged = gitops.ai_attribution_in_range(task["worktree_path"], task["base_commit"], "HEAD")
+        attribution_note = ""
+        if flagged:
+            attribution_note = ("\nWarning: agent-made commits carry AI attribution lines (Forge's own commits never do): "
+                                + "; ".join(f"{f['sha'][:10]}: {' | '.join(f['lines'])}" for f in flagged))
+            self.forge.bus.emit("worktree.ai_attribution", attribution_note.strip(), project_id=pid, task_id=tid,
+                                level="warn", data={"commits": flagged})
         if task["approval_policy"] == "never_merge":
             self._complete(task, f"completed; changes left on branch {task['branch']} (policy: never merge)")
             return
@@ -841,7 +848,7 @@ class Engine:
             return
         self.forge.approvals.request(pid, tid, "merge", f"Merge {task['branch']} into your working branch",
                                      f"Diff summary:\n{stat}\nMerging modifies your project working tree "
-                                     "(refused if it has uncommitted changes).",
+                                     "(refused if it has uncommitted changes)." + attribution_note,
                                      {"branch": task["branch"], "base": task["base_commit"]})
         self._to(task, S.AWAITING_APPROVAL, "changes ready; waiting for merge approval", phase=FINISH)
 

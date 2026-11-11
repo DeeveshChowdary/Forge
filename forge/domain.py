@@ -110,6 +110,8 @@ class GlobalSettings(BaseModel):
     claude_path: str = ""
     claude_models: list[str] = Field(default_factory=lambda: ["sonnet", "opus", "haiku"])
     codex_ignore_user_config: bool = True   # reproducible, isolated codex runs (auth still from CODEX_HOME)
+    # Agent CLIs must not add AI co-author trailers / "Generated with" lines to commits or PRs.
+    disable_ai_attribution: bool = True
     enable_mock_provider: bool = False      # deterministic mock agents (always labelled as mock)
     disabled_providers: list[str] = Field(default_factory=list)
     # Paid-API adapters do not exist yet; this flag is the switch that must be flipped

@@ -173,3 +173,11 @@ async def test_live_probes():
             pytest.skip(f"{a.name} not installed")
         r = await a.probe(model)
         print(a.name, model, r)
+
+
+async def test_claude_agents_run_without_ai_attribution(tmp_path):
+    a = ClaudeCodeAdapter(fake_bin(tmp_path, "claude", "true"))
+    argv = a.build_argv(ExecRequest(prompt="p", cwd=tmp_path, role="implementer", sandbox="workspace_write"))
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"attribution": {"commit": "", "pr": ""}}
+    off = ClaudeCodeAdapter(fake_bin(tmp_path, "claude2", "true"), disable_attribution=False)
+    assert "--settings" not in off.build_argv(ExecRequest(prompt="p", cwd=tmp_path, role="implementer"))

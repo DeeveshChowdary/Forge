@@ -48,7 +48,7 @@ class ProviderRegistry:
     def _build(self) -> None:
         s = self.forge.settings()
         adapters: list[ProviderAdapter] = [
-            ClaudeCodeAdapter(s.claude_path, s.claude_models),
+            ClaudeCodeAdapter(s.claude_path, s.claude_models, s.disable_ai_attribution),
             CodexAdapter(s.codex_path, s.codex_ignore_user_config),
         ]
         if s.enable_mock_provider:

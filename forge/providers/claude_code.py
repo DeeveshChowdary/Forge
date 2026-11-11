@@ -27,6 +27,8 @@ from .util import classify_error, extract_json, shorten
 
 EFFORTS = ["low", "medium", "high", "max"]
 READ_TOOLS = ["Read", "Grep", "Glob"]
+# Claude Code's supported `attribution` setting: empty strings hide commit/PR attribution.
+NO_ATTRIBUTION = json.dumps({"attribution": {"commit": "", "pr": ""}})
 WRITE_TOOLS = ["Edit", "Write"]
 NET_TOOLS = ["WebSearch", "WebFetch"]
 
@@ -35,9 +37,11 @@ class ClaudeCodeAdapter(ProviderAdapter):
     name = "claude_code"
     display_name = "Claude Code CLI (Anthropic)"
 
-    def __init__(self, path_override: str = "", configured_models: list[str] | None = None):
+    def __init__(self, path_override: str = "", configured_models: list[str] | None = None,
+                 disable_attribution: bool = True):
         self.path_override = path_override
         self.configured_models = configured_models or ["sonnet", "opus", "haiku"]
+        self.disable_attribution = disable_attribution
 
     def binary(self) -> str | None:
         if self.path_override and Path(self.path_override).exists():
@@ -126,6 +130,8 @@ class ClaudeCodeAdapter(ProviderAdapter):
         argv = [b, "-p", "--output-format", "stream-json", "--verbose",
                 "--setting-sources", "user",      # ignore repository-provided .claude settings (untrusted)
                 "--strict-mcp-config"]            # ignore repository .mcp.json unless Forge passes one
+        if self.disable_attribution:
+            argv += ["--settings", NO_ATTRIBUTION]  # no AI co-author trailers in any commit/PR the agent makes
         if req.mcp_config_path:
             argv += ["--mcp-config", str(req.mcp_config_path)]
         if req.model:
