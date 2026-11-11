@@ -119,3 +119,16 @@ Details and real run records: [TEST_RESULTS.md](TEST_RESULTS.md).
 
 Working: everything listed above, with tests. Not yet built: paid-API adapters, GitHub
 push/PR automation, learned routing, multi-user auth. See [HANDOFF.md](HANDOFF.md).
+
+## Collaboration policies and literature research (M10)
+
+* `--collaboration auto|cross_model|independent_research|implement_review|manual` (CLI) or the
+  *Collaboration policy* field in New task. Policies are enforced by the engine; if a required
+  provider is unavailable the task is refused or blocked — never silently run on one model.
+* `literature_review` workflow: Literature Review → Independent Analysis (Claude and Codex
+  separately) → Novelty Assessment → Cross-Review → GO/PIVOT/REJECT/INCONCLUSIVE Decision.
+  Reports are written to `forge-reports/<task>/` in the task worktree and committed.
+* `forge plan PROJECT --workflow W --collaboration P --objective "…"` shows the provider/model
+  per phase plus preflight warnings before anything runs.
+* Limits are per phase; a limit hit preserves partial work as a checkpoint and continues once;
+  `forge retry TASK --max-turns N --continue` for deliberate retries. See docs/M10_RCA.md.

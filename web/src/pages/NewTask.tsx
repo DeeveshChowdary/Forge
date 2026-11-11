@@ -29,6 +29,9 @@ export default function NewTask() {
   const [decompose, setDecompose] = useState(false);
   const [milestone, setMilestone] = useState(false);
   const [mockJson, setMockJson] = useState("");
+  const [collab, setCollab] = useState("");
+  const [decomposeMode, setDecomposeMode] = useState("");
+  const [plan, setPlan] = useState<any>(null);
   const [preview, setPreview] = useState<Record<string, any>>({});
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,6 +55,24 @@ export default function NewTask() {
     .map((m: any) => ({ ...m, auth: p.auth_state }))), [prov]);
   const mockEnabled = settings?.settings?.enable_mock_provider;
 
+  const body = (extra: any = {}) => ({
+    project_id: projectId, title: title || goal.split("\n")[0].slice(0, 80) || "preview", objective: goal || "preview", workflow,
+    complexity, criticality, routing_mode: routing === "manual" ? "manual" : mode,
+    collaboration: routing === "manual" ? "manual" : (collab || undefined), decompose: decomposeMode || decompose, ...extra,
+  });
+  const previewPlan = async () => {
+    setErr(null);
+    try { setPlan(await api.post("/api/tasks/preflight", body({ routing_overrides: manualOverrides() }))); } catch (e: any) { setErr(e.message); }
+  };
+  const manualOverrides = () => {
+    const overrides: Record<string, any> = {};
+    if (routing !== "manual") return overrides;
+    for (const ph of agentPhases) {
+      const r = manual[ph.key];
+      if (r?.provider && r?.model) overrides[ph.key] = ph.kind === "fanout" ? [r, ...(manual[`${ph.key}#2`]?.model ? [manual[`${ph.key}#2`]] : [])] : r;
+    }
+    return overrides;
+  };
   const runPreview = async () => {
     if (!projectId || routing === "manual") return;
     setErr(null);
@@ -86,7 +107,8 @@ export default function NewTask() {
         acceptance_criteria: criteria.split("\n").map((s) => s.trim()).filter(Boolean),
         complexity, criticality, routing_mode: routing === "manual" ? "manual" : mode, routing_overrides: overrides,
         review_depth: reviewDepth, approval_policy: approval, budget: { max_known_api_usd: maxUsd },
-        decompose, as_milestone: milestone, mock, execution_mode: readOnly ? "read_only" : undefined,
+        decompose: decomposeMode || decompose, as_milestone: milestone,
+        collaboration: routing === "manual" ? "manual" : (collab || undefined), mock, execution_mode: readOnly ? "read_only" : undefined,
       });
       nav(`/tasks/${t.id}`);
     } catch (e: any) {
@@ -138,6 +160,22 @@ export default function NewTask() {
             <Field label="Workflow">
               <select className="input" value={workflow} onChange={(e) => { setWorkflow(e.target.value); setPreview({}); }}>
                 {workflows.map((w) => <option key={w.key} value={w.key} disabled={readOnly && !w.read_only_ok}>{w.name}{readOnly && !w.read_only_ok ? " (needs write)" : ""}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Collaboration policy" hint={`Workflow default: ${wf?.default_collaboration ?? "auto"}`}>
+              <select className="input" value={collab} onChange={(e) => { setCollab(e.target.value); setPlan(null); }}>
+                <option value="">workflow default</option>
+                <option value="auto">Auto — router chooses freely</option>
+                <option value="cross_model">Cross-model — at least two providers</option>
+                <option value="independent_research">Independent research — Claude and Codex separately</option>
+                <option value="implement_review">Implement & review — different providers</option>
+              </select>
+            </Field>
+            <Field label="Decomposition">
+              <select className="input" value={decomposeMode} onChange={(e) => setDecomposeMode(e.target.value)}>
+                <option value="">none</option><option value="sections">one subtask per ## section of the goal</option>
               </select>
             </Field>
           </div>
@@ -234,8 +272,23 @@ export default function NewTask() {
           </div>
         </Card>
       </div>
+      <Card title="Plan before execution">
+        <button type="button" className="btn" onClick={previewPlan} disabled={!projectId}>Show planned provider/model per phase</button>
+        {plan && (
+          <div className="mt-3 space-y-2 text-sm" data-testid="plan-preview">
+            <div>Workflow <code>{plan.workflow}</code> · policy <Badge tone="blue">{plan.collaboration}</Badge></div>
+            <ul className="space-y-1">{plan.route_plan.phases.map((p: any) => (
+              <li key={p.phase} className="flex flex-wrap gap-2"><span className="w-44 font-medium">{p.phase}</span>
+                {p.agents.length ? p.agents.map((a: any, i: number) => a.error ? <Badge key={i} tone="red">blocked: {a.error.slice(0, 90)}</Badge>
+                  : <span key={i} className="font-mono text-xs">{a.provider}/{a.model}{a.effort ? ` · ${a.effort}` : ""}{plan.estimates?.[p.phase] ? ` · ~${plan.estimates[p.phase].estimated_steps}/${plan.estimates[p.phase].limit} steps` : ""}</span>)
+                  : <span className="muted">{p.kind}</span>}</li>))}</ul>
+            {plan.warnings.map((w: string, i: number) => <div key={i} className="text-xs text-yellow-800 dark:text-yellow-300">⚠ {w}</div>)}
+            {plan.blockers.map((b: string, i: number) => <div key={i} className="text-xs text-red-600">⛔ {b}</div>)}
+          </div>
+        )}
+      </Card>
       <ErrorBox error={err} />
-      <div className="flex justify-end"><button className="btn btn-primary px-6 py-2" disabled={busy || !goal.trim()}>{busy ? "Submitting…" : "Start task"}</button></div>
+      <div className="flex justify-end"><button className="btn btn-primary px-6 py-2" disabled={busy || !goal.trim() || (plan?.blockers?.length ?? 0) > 0}>{busy ? "Submitting…" : "Start task"}</button></div>
     </form>
   );
 }

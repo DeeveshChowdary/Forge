@@ -96,3 +96,8 @@ artifact. Raise the project's `max_turns` (e.g. 150) and retry.
 9. Rollback: stop the server, `git checkout` the previous commit; the extra tables are
    ignored by the old code (or restore the backup).
 
+## M10 (branch dev/m9-external-coordination)
+
+See docs/M10_RCA.md for the root cause of t_fa827e885e2d and the recovery plan (awaiting
+approval; staged in ~/.forge/recovery/t_fa827e885e2d/). Not deployed: activation follows the
+M9 procedure above.

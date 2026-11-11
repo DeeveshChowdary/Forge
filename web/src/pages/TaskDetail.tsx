@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApprovalCard } from "../components/shared";
+import { FailureAndRecovery, ProgressLimits, RoutePlan } from "../components/TaskInsights";
 import { Badge, Card, DiffView, Elapsed, Empty, ErrorBox, MockBadge, Modal, RunBadge, Spinner, StateBadge, StructuredView, Tabs } from "../components/ui";
 import { api, type Artifact, type ForgeEvent, type Run } from "../lib/api";
 import { clock, duration, num } from "../lib/format";
@@ -51,7 +52,7 @@ export default function TaskDetail() {
           {(ACTIVE.includes(t.state) || ["READY", "AWAITING_APPROVAL", "BLOCKED"].includes(t.state)) && !t.pause_requested &&
             <button className="btn" onClick={() => act("pause")}>Pause</button>}
           {t.state === "PAUSED" && <button className="btn btn-primary" onClick={() => act("resume")}>Resume</button>}
-          {["FAILED", "BLOCKED"].includes(t.state) && t.phase !== "__await_children__" && <button className="btn btn-primary" onClick={() => act("retry")}>Retry</button>}
+          {(t.state === "BLOCKED" || (t.state === "FAILED" && t.analysis?.last_failure?.classification !== "limit_exhausted")) && t.phase !== "__await_children__" && <button className="btn btn-primary" onClick={() => act("retry")}>Retry</button>}
           {!["COMPLETED", "FAILED", "CANCELLED"].includes(t.state) && !t.cancel_requested &&
             <button className="btn btn-danger" onClick={() => { if (confirm("Stop and cancel this task?")) act("cancel"); }}>Stop</button>}
         </div>
@@ -63,6 +64,9 @@ export default function TaskDetail() {
       {pending.map((a: any) => <ApprovalCard key={a.id} a={a} onDone={reload} />)}
 
       <PhaseTimeline t={t} wf={wf} />
+      <FailureAndRecovery t={t} onChange={reload} />
+      <ProgressLimits t={t} events={events} />
+      <RoutePlan t={t} />
 
       <div className="grid gap-4 md:grid-cols-3">
         <Card title="Current agent">

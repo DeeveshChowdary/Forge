@@ -177,3 +177,20 @@ have not been exercised. `forge bridge check` reports this. Live write integrati
 remains **unverified** until a token is configured and `forge bridge check` + one test
 issue succeed.
 
+## M10 — workflow reliability and multi-model coordination
+
+Backend 101 passed (15 new in `tests/test_m10.py`), frontend 12 passed, e2e as below.
+Regression tests reproduce task t_fa827e885e2d (deterministic step-limit hit with partial
+files) and verify: one continuation with resumed session and preserved files, then a stop
+with no identical retry; no continuation without progress; per-phase limits; retry
+classification; preflight flags (workflow mismatch, Claude+Codex under auto, step estimate
+over limit, decomposition, environment checks) on the real objective's shape;
+`literature_review` with `independent_research` end to end (Claude and Codex both ran the
+independent and cross-review phases, each cross-reviewer received the other's analysis,
+7 reports committed, unresolved citation flagged, decision produced, no test phase);
+policy blockers at submission and at runtime with no fallback; implement/review and
+cross-model separation; manual policy validation; section decomposition; recovery to a
+branch behind approval with the user's tree untouched; analysis of a legacy failed task.
+Real failed task verified in the UI (DB copy): banner "not empty", 41/40 steps,
+`limit_exhausted`, both recoverable bundles. Recovery patches verified with
+`git apply --check` against base 8a48c09; nothing applied.
