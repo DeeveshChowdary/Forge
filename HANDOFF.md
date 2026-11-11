@@ -66,7 +66,7 @@ Real records live in `~/.forge/forge.db` (projects `handoff-demo`, `R4`); view t
 3. Optional hardening: API token for the local server; Codex MCP pass-through; GitHub PR
    approval flow.
 
-## M9 — external coordination (branch `dev/m9-external-coordination`, not merged)
+## M9 — external coordination (merged into main and deployed 2026-11-11)
 
 Developed in the worktree `~/research/forge-m9` so the running instance (started from
 the main checkout) was never touched. See docs/EXTERNAL_COORDINATION.md,
@@ -96,8 +96,8 @@ artifact. Raise the project's `max_turns` (e.g. 150) and retry.
 9. Rollback: stop the server, `git checkout` the previous commit; the extra tables are
    ignored by the old code (or restore the backup).
 
-## M10 (branch dev/m9-external-coordination)
+## M10 (merged into main and deployed 2026-11-11)
 
 See docs/M10_RCA.md for the root cause of t_fa827e885e2d and the recovery plan (awaiting
-approval; staged in ~/.forge/recovery/t_fa827e885e2d/). Not deployed: activation follows the
+approval; staged in ~/.forge/recovery/t_fa827e885e2d/). Deployed following the
 M9 procedure above.
